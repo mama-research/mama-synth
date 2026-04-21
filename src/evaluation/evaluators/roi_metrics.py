@@ -27,7 +27,10 @@ from .base import BaseEvaluator, Case, EvaluationResult
 # Pyradiomics settings — aligned with mama-synth-eval / frd-score
 # ======================================================================
 
-FRD_FEATURE_CLASSES: list[str] = [
+# Feature classes and bin width used by the *local* radiomic classifier
+# (AUROC contrast / tumour-ROI).  These are separate from the frd-score
+# library's internal extractor (which uses its own defaults for FRD v1).
+CLF_FEATURE_CLASSES: list[str] = [
     "firstorder",
     "glcm",
     "glrlm",
@@ -36,7 +39,7 @@ FRD_FEATURE_CLASSES: list[str] = [
     "ngtdm",
 ]
 
-FRD_DEFAULT_BIN_WIDTH: int = 25
+CLF_DEFAULT_BIN_WIDTH: int = 25
 
 # Extractor cache (per-process)
 _EXTRACTOR_CACHE: dict[tuple, object] = {}
@@ -59,11 +62,10 @@ class ROIMetricsEvaluator(BaseEvaluator):
                 continue
 
             # ---- SSIM within mask (standard local-window) --------
-            data_range = float(
-                np.max(case.ground_truth) - np.min(case.ground_truth)
-            )
-            if data_range == 0:
-                data_range = 1.0
+            # Fixed data_range = 10.0 matches the ±5σ clip used in LPIPS
+            # pre-processing, making SSIM stability constants comparable
+            # across all cases in z-score normalised space.
+            data_range = 10.0
 
             ssim_full, ssim_map = structural_similarity(
                 case.prediction,
@@ -83,7 +85,8 @@ class ROIMetricsEvaluator(BaseEvaluator):
         # ---- FRD via frd-score library ---------------------------
         frd_val = self._compute_frd(cases)
         if frd_val is not None:
-            agg["frd"] = {"mean": frd_val, "std": 0.0}
+            # FRD is an aggregate-only scalar; no std across cases.
+            agg["frd"] = {"mean": frd_val}
 
         return EvaluationResult(per_case=per_case, aggregates=agg)
 
@@ -216,13 +219,14 @@ def extract_radiomic_features(
     image: np.ndarray,
     mask: np.ndarray,
     feature_classes: Optional[list[str]] = None,
-    bin_width: int = FRD_DEFAULT_BIN_WIDTH,
+    bin_width: int = CLF_DEFAULT_BIN_WIDTH,
 ) -> np.ndarray:
     """Extract IBSI-compliant radiomic features from a 2-D image.
 
     Returns a 1-D ``float64`` feature vector.  Settings (``binWidth``,
-    feature classes, etc.) are aligned with ``mama-synth-eval`` and the
-    ``frd-score`` library defaults.
+    feature classes, etc.) are aligned with ``mama-synth-eval``.
+    These features are used by the local classifier (AUROC tasks) and
+    are distinct from the features extracted internally by frd-score.
 
     Raises ``ImportError`` if ``pyradiomics`` is not installed.
     """
@@ -230,7 +234,7 @@ def extract_radiomic_features(
     from radiomics import featureextractor  # type: ignore[import-untyped]
 
     if feature_classes is None:
-        feature_classes = FRD_FEATURE_CLASSES
+        feature_classes = CLF_FEATURE_CLASSES
 
     # Suppress verbose pyradiomics logging (once)
     if not getattr(extract_radiomic_features, "_verbosity_set", False):
@@ -314,7 +318,7 @@ def extract_radiomic_features_cached(
     image: np.ndarray,
     mask: np.ndarray,
     feature_classes: Optional[list[str]] = None,
-    bin_width: int = FRD_DEFAULT_BIN_WIDTH,
+    bin_width: int = CLF_DEFAULT_BIN_WIDTH,
 ) -> np.ndarray:
     """Extract radiomic features with in-memory caching."""
     cached = get_cached_features(image, mask)
@@ -340,6 +344,7 @@ def clear_feature_cache() -> None:
 
 
 def _write_mha(arr: np.ndarray, path: str) -> None:
-    """Write a numpy array as a ``.mha`` file."""
+    """Write a numpy array as a ``.mha`` file, creating parent dirs."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     img = sitk.GetImageFromArray(arr)
     sitk.WriteImage(img, path)

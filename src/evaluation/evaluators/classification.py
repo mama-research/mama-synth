@@ -189,12 +189,10 @@ class CNNClassifier:
         import torch
         import torch.nn.functional as F
 
+        # Input is z-score normalised; pass through without rescaling
+        # so that the classifier operates on the same intensity scale
+        # as during training.
         img = slice_2d.astype(np.float32)
-        mn, mx = float(img.min()), float(img.max())
-        if mx - mn > 1e-8:
-            img = (img - mn) / (mx - mn)
-        else:
-            img = np.zeros_like(img)
 
         tensor = torch.from_numpy(img).unsqueeze(0)  # (1, H, W)
         tensor = F.interpolate(
@@ -374,12 +372,14 @@ class ClassificationEvaluator(BaseEvaluator):
         if self.contrast_clf is not None:
             auroc = self._auroc_contrast(cases)
             if auroc is not None:
-                agg["auroc_contrast"] = {"mean": auroc, "std": 0.0}
+                # AUROC is an aggregate-only scalar; no std across cases.
+                agg["auroc_contrast"] = {"mean": auroc}
 
         if self.tumor_roi_clf is not None:
             auroc = self._auroc_tumor_roi(cases)
             if auroc is not None:
-                agg["auroc_tumor_roi"] = {"mean": auroc, "std": 0.0}
+                # AUROC is an aggregate-only scalar; no std across cases.
+                agg["auroc_tumor_roi"] = {"mean": auroc}
 
         return EvaluationResult(per_case={}, aggregates=agg)
 
@@ -388,7 +388,12 @@ class ClassificationEvaluator(BaseEvaluator):
     def _auroc_contrast(
         self, cases: list[Case]
     ) -> Optional[float]:
-        """AUROC: synthetic-post (label 1) vs real-precontrast (label 0)."""
+        """AUROC: synthetic-post (label 1) vs real-precontrast (label 0).
+
+        Returns ``None`` if fewer than 4 feature vectors are available
+        (minimum required for a meaningful binary AUROC: at least one
+        sample per class with one extra each to avoid degenerate ROC).
+        """
         feats: list[np.ndarray] = []
         labels: list[int] = []
 
@@ -445,6 +450,10 @@ class ClassificationEvaluator(BaseEvaluator):
 
         Uses anatomical midline detection to create a physiologically
         meaningful contralateral region.
+
+        Returns ``None`` if fewer than 4 feature vectors are available
+        (minimum required for a meaningful binary AUROC: at least one
+        sample per class with one extra each to avoid degenerate ROC).
         """
         feats: list[np.ndarray] = []
         labels: list[int] = []

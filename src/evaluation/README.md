@@ -78,6 +78,7 @@ evaluators/
     roi_metrics.py       ← ROIMetricsEvaluator      (SSIM-ROI, FRD)
     classification.py    ← ClassificationEvaluator   (AUROC × 2)
     segmentation.py      ← SegmentationEvaluator     (Dice, HD95)
+    mirror_utils.py      ← midline detection + contralateral mask mirroring
 models/                  ← bundled classifier .pkl files
 ground_truth/            ← GT data for Docker test runs
 ```

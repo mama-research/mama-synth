@@ -19,11 +19,13 @@ Ported from ``mama-synth-eval/src/eval/mirror_utils.py``.
 
 from __future__ import annotations
 
-import sys
+import logging
 from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 # Default parameters
 DEFAULT_MIN_TISSUE_FRACTION = 0.3
@@ -37,6 +39,13 @@ tissue/background boundary."""
 DEFAULT_MIDLINE_SEARCH_FRACTION = 0.4
 """Fraction of the image width (centered) within which to search
 for the midline valley."""
+
+BACKGROUND_Z_THRESHOLD: float = -1.5
+"""Intensity threshold separating background from breast tissue in
+z-score normalised images.  Background (air) consistently falls below
+−2σ; glandular tissue starts at approximately −1.5σ and above.
+Replaces the naïve ``image > 0`` filter which erroneously excluded the
+∼40–50% of tissue with below-mean z-scores."""
 
 
 def detect_midline(
@@ -133,11 +142,16 @@ def _compute_tissue_threshold(
     image: NDArray[np.floating],
     percentile: float = DEFAULT_TISSUE_THRESHOLD_PERCENTILE,
 ) -> float:
-    """Tissue/background threshold from non-zero intensity percentile."""
-    nonzero = image[image > 0]
-    if nonzero.size == 0:
-        return 0.0
-    return float(np.percentile(nonzero, percentile))
+    """Tissue/background threshold from a low percentile of tissue voxels.
+
+    Filters to pixels above ``BACKGROUND_Z_THRESHOLD`` (valid for
+    z-score normalised images where background air < −2σ) and returns
+    the given percentile as a conservative lower bound on tissue signal.
+    """
+    tissue = image[image > BACKGROUND_Z_THRESHOLD]
+    if tissue.size == 0:
+        return BACKGROUND_Z_THRESHOLD
+    return float(np.percentile(tissue, percentile))
 
 
 def validate_mirrored_region(
@@ -181,18 +195,17 @@ def create_mirrored_mask(
         The mirrored mask if validation passes, or ``None`` if it fails.
     """
     if not np.any(mask):
-        print("WARNING: Input mask is empty, cannot create mirror.",
-              file=sys.stderr)
+        logger.warning("Input mask is empty, cannot create mirror.")
         return None
 
     midline = detect_midline(image, search_fraction=search_fraction)
     mirrored = mirror_mask(mask, midline)
 
     if not np.any(mirrored):
-        print(
-            f"WARNING: Mirrored mask is empty (midline={midline}). "
+        logger.warning(
+            "Mirrored mask is empty (midline=%d). "
             "Mask may be too close to the image boundary.",
-            file=sys.stderr,
+            midline,
         )
         return None
 
@@ -201,9 +214,9 @@ def create_mirrored_mask(
     ):
         return mirrored
 
-    print(
-        f"WARNING: Mirrored mask failed tissue validation "
-        f"(midline={midline}, min_tissue_fraction={min_tissue_fraction}).",
-        file=sys.stderr,
+    logger.warning(
+        "Mirrored mask failed tissue validation "
+        "(midline=%d, min_tissue_fraction=%.2f).",
+        midline, min_tissue_fraction,
     )
     return None
