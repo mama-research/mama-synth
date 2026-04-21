@@ -1,0 +1,5 @@
+# Placeholder — add pre-trained classifier .pkl files here.
+# Expected files:
+#   contrast_classifier.pkl
+#   tumor_roi_classifier.pkl
+#   segmentation/   (optional nnUNet model directory)

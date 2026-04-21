@@ -1,0 +1,5 @@
+# Placeholder — add ground-truth files for Docker-based test runs.
+# Expected sub-directories:
+#   images/       ← real post-contrast 2-D .mha slices
+#   masks/        ← binary tumour masks .mha
+#   precontrast/  ← real pre-contrast 2-D .mha slices

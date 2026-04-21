@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""MAMA-SYNTH Grand Challenge Evaluation Method.
+
+Reads algorithm outputs (synthetic post-contrast breast DCE-MRI
+slices) and evaluates them against ground truth using:
+
+  * **Image-to-image**: MSE, LPIPS
+  * **ROI-to-ROI**: SSIM (tumour mask), FRD (Fréchet Radiomics Distance)
+  * **Classification**: AUROC contrast, AUROC tumour-ROI
+  * **Segmentation**: Dice, HD95
+
+Grand Challenge directory layout
+--------------------------------
+::
+
+    /input/
+        predictions.json
+        {job_pk}/output/images/{slug}/*.mha
+
+    /opt/ml/input/data/ground_truth/
+        images/          ← real post-contrast 2-D .mha slices
+        masks/           ← binary tumour masks .mha
+        precontrast/     ← real pre-contrast 2-D .mha slices
+
+    /opt/app/models/
+        contrast_classifier.pkl
+        tumor_roi_classifier.pkl
+        segmentation/    ← (optional) bundled segmentation model
+
+    /output/
+        metrics.json     ← evaluation results
+
+Local (development) mode
+------------------------
+Set environment variables to override default GC paths::
+
+    MAMA_INPUT_DIR          (default: /input)
+    MAMA_OUTPUT_DIR         (default: /output)
+    MAMA_GT_DIR             (default: /opt/ml/input/data/ground_truth)
+    MAMA_MODELS_DIR         (default: /opt/app/models)
+    MAMA_PREDICTIONS_DIR    (flat dir of .mha predictions, local mode)
+    MAMA_MASKS_DIR          (flat dir of .mha masks, local mode)
+    MAMA_PRECONTRAST_DIR    (flat dir of .mha pre-contrast, local mode)
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from glob import glob
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import SimpleITK as sitk
+
+from evaluators import (
+    Case,
+    ClassificationEvaluator,
+    ImageMetricsEvaluator,
+    ROIMetricsEvaluator,
+    SegmentationEvaluator,
+)
+
+# ======================================================================
+# Interface slugs — customise for your GC phase configuration
+# ======================================================================
+PREDICTION_SLUG = os.environ.get(
+    "MAMA_PREDICTION_SLUG", "synthetic-post-contrast-breast-mri"
+)
+INPUT_SLUG = os.environ.get(
+    "MAMA_INPUT_SLUG", "pre-contrast-breast-mri"
+)
+
+
+# ======================================================================
+# I/O helpers
+# ======================================================================
+
+
+def load_image(path: Path) -> np.ndarray:
+    """Load a .mha image as ``float64`` (no additional normalisation).
+
+    Images are expected to arrive **z-score normalised** using pre-contrast
+    reference statistics.  No per-image min-max is applied — this avoids
+    the bias that independent normalisation would introduce in MSE, LPIPS,
+    and SSIM.
+    """
+    img = sitk.ReadImage(str(path))
+    arr = sitk.GetArrayFromImage(img).astype(np.float64)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    return arr
+
+
+def load_mask(path: Path) -> np.ndarray:
+    """Load a binary mask from .mha — returns a ``bool`` array."""
+    img = sitk.ReadImage(str(path))
+    arr = sitk.GetArrayFromImage(img).astype(np.float64)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    return arr > 0
+
+
+def write_metrics(metrics: dict, path: Path) -> None:
+    """Write *metrics* as JSON to *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(metrics, fh, indent=2)
+
+
+def _find_file(directory: Path, stem: str) -> Optional[Path]:
+    """Find a .mha (or .nii.gz) file matching *stem* in *directory*."""
+    if not directory.exists():
+        return None
+    for ext in (".mha", ".nii.gz", ".nii"):
+        candidate = directory / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# ======================================================================
+# Case loaders
+# ======================================================================
+
+
+def load_cases_gc(
+    input_dir: Path,
+    gt_dir: Path,
+) -> list[Case]:
+    """Load cases using the GC ``predictions.json`` interface."""
+    predictions_file = input_dir / "predictions.json"
+    with open(predictions_file) as fh:
+        predictions = json.load(fh)
+
+    cases: list[Case] = []
+    for job in predictions:
+        pk = job["pk"]
+
+        # --- Locate the prediction .mha --------------------------------
+        pred_dir = input_dir / pk / "output" / f"images/{PREDICTION_SLUG}"
+        pred_files = glob(str(pred_dir / "*.mha"))
+        if not pred_files:
+            continue
+        prediction = load_image(Path(pred_files[0]))
+
+        # --- Case ID from the algorithm input image name ---------------
+        case_name = _gc_input_image_name(job)
+        if case_name is None:
+            continue
+        case_id = Path(case_name).stem
+
+        # --- Ground truth, mask, pre-contrast --------------------------
+        gt_path = _find_file(gt_dir / "images", case_id)
+        if gt_path is None:
+            continue
+        ground_truth = load_image(gt_path)
+
+        mask: Optional[np.ndarray] = None
+        mask_path = _find_file(gt_dir / "masks", case_id)
+        if mask_path:
+            mask = load_mask(mask_path)
+
+        precontrast: Optional[np.ndarray] = None
+        precon_path = _find_file(gt_dir / "precontrast", case_id)
+        if precon_path:
+            precontrast = load_image(precon_path)
+
+        cases.append(
+            Case(
+                case_id=case_id,
+                prediction=prediction,
+                ground_truth=ground_truth,
+                mask=mask,
+                precontrast=precontrast,
+                prediction_path=str(pred_files[0]),
+                ground_truth_path=str(gt_path),
+                mask_path=str(mask_path) if mask_path else None,
+            )
+        )
+
+    return cases
+
+
+def load_cases_local(
+    pred_dir: Path,
+    gt_dir: Path,
+    masks_dir: Optional[Path] = None,
+    precon_dir: Optional[Path] = None,
+) -> list[Case]:
+    """Load cases from flat directories (for local development)."""
+    cases: list[Case] = []
+    for pred_file in sorted(pred_dir.glob("*.mha")):
+        case_id = pred_file.stem
+        gt_path = _find_file(gt_dir, case_id)
+        if gt_path is None:
+            continue
+
+        mask: Optional[np.ndarray] = None
+        mask_file: Optional[Path] = None
+        if masks_dir:
+            mask_file = _find_file(masks_dir, case_id)
+            if mask_file:
+                mask = load_mask(mask_file)
+
+        precontrast: Optional[np.ndarray] = None
+        if precon_dir:
+            precon_path = _find_file(precon_dir, case_id)
+            if precon_path:
+                precontrast = load_image(precon_path)
+
+        cases.append(
+            Case(
+                case_id=case_id,
+                prediction=load_image(pred_file),
+                ground_truth=load_image(gt_path),
+                mask=mask,
+                precontrast=precontrast,
+                prediction_path=str(pred_file),
+                ground_truth_path=str(gt_path),
+                mask_path=str(mask_file) if mask_file else None,
+            )
+        )
+    return cases
+
+
+def _gc_input_image_name(job: dict) -> Optional[str]:
+    """Extract the original input image filename from a GC job."""
+    for inp in job.get("inputs", []):
+        if inp.get("interface", {}).get("slug") == INPUT_SLUG:
+            return inp.get("image", {}).get("name")
+    return None
+
+
+# ======================================================================
+# Segmentation model loader
+# ======================================================================
+
+
+def load_segmentation_model(
+    models_dir: Optional[Path],
+) -> Optional[object]:
+    """Return a segmentation callable, or ``None`` if unavailable.
+
+    Replace this stub with your nnUNet / custom model loader.
+    The callable must accept a 2-D ``float64`` array (z-score
+    normalised) and return a binary ``bool`` mask.
+    """
+    if models_dir is None:
+        return None
+    seg_dir = models_dir / "segmentation"
+    if not seg_dir.exists():
+        return None
+    # TODO: Load nnUNet or custom segmentation model from *seg_dir*.
+    #       Example:
+    #
+    #   from my_segmenter import Segmenter
+    #   model = Segmenter.load(seg_dir)
+    #   return model.predict   # must return bool ndarray
+    #
+    return None
+
+
+# ======================================================================
+# Pipeline orchestrator
+# ======================================================================
+
+
+def run_evaluation(
+    cases: list[Case],
+    models_dir: Optional[Path] = None,
+) -> dict:
+    """Run all evaluators on *cases*, return the metrics dict.
+
+    This is the main public API for programmatic use and testing.
+    """
+    # Check for ensemble mode via environment variable
+    ensemble = os.environ.get("MAMA_ENSEMBLE", "").lower() in (
+        "1", "true", "yes",
+    )
+
+    evaluators: list[tuple[str, object]] = [
+        ("ImageMetrics", ImageMetricsEvaluator()),
+        ("ROIMetrics", ROIMetricsEvaluator()),
+        (
+            "Classification",
+            ClassificationEvaluator(
+                contrast_model=(
+                    models_dir / "contrast_classifier.pkl"
+                    if models_dir
+                    else None
+                ),
+                tumor_roi_model=(
+                    models_dir / "tumor_roi_classifier.pkl"
+                    if models_dir
+                    else None
+                ),
+                models_dir=models_dir,
+                ensemble=ensemble,
+            ),
+        ),
+        (
+            "Segmentation",
+            SegmentationEvaluator(
+                segment_fn=load_segmentation_model(models_dir),
+            ),
+        ),
+    ]
+
+    all_per_case: dict[str, dict[str, float]] = {}
+    all_aggregates: dict[str, dict[str, float]] = {}
+
+    for name, evaluator in evaluators:
+        try:
+            result = evaluator.evaluate(cases)  # type: ignore[attr-defined]
+            for cid, m in result.per_case.items():
+                all_per_case.setdefault(cid, {}).update(m)
+            all_aggregates.update(result.aggregates)
+            n_agg = len(result.aggregates)
+            print(f"  {name}: OK ({n_agg} aggregate metric(s))")
+        except Exception as exc:
+            print(f"  {name}: FAILED — {exc}", file=sys.stderr)
+
+    # Clear the in-memory radiomic feature cache to free memory
+    from evaluators.roi_metrics import clear_feature_cache
+    clear_feature_cache()
+
+    return {"case": all_per_case, "aggregates": all_aggregates}
+
+
+# ======================================================================
+# CLI entry point
+# ======================================================================
+
+
+def main() -> int:
+    """Main entry point for the GC evaluation container."""
+    print("=" * 50)
+    print("MAMA-SYNTH Evaluation")
+    print("=" * 50)
+
+    # ---- Read configuration from environment -------------------------
+    input_dir = Path(os.environ.get("MAMA_INPUT_DIR", "/input"))
+    output_dir = Path(os.environ.get("MAMA_OUTPUT_DIR", "/output"))
+    gt_dir = Path(
+        os.environ.get(
+            "MAMA_GT_DIR", "/opt/ml/input/data/ground_truth"
+        )
+    )
+    models_dir = Path(
+        os.environ.get("MAMA_MODELS_DIR", "/opt/app/models")
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = output_dir / "metrics.json"
+
+    # ---- Discover and load cases -------------------------------------
+    if (input_dir / "predictions.json").exists():
+        print("Loading cases from GC predictions.json …")
+        cases = load_cases_gc(input_dir, gt_dir)
+    else:
+        print("Loading cases from flat directories (local mode) …")
+        pred_dir = Path(
+            os.environ.get("MAMA_PREDICTIONS_DIR", str(input_dir))
+        )
+        gt_images_dir = (
+            gt_dir / "images" if (gt_dir / "images").exists() else gt_dir
+        )
+        masks_env = os.environ.get("MAMA_MASKS_DIR")
+        precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
+        masks_sub = gt_dir / "masks"
+        precon_sub = gt_dir / "precontrast"
+        masks_dir = (
+            Path(masks_env) if masks_env
+            else masks_sub if masks_sub.exists()
+            else None
+        )
+        precon_dir = (
+            Path(precon_env) if precon_env
+            else precon_sub if precon_sub.exists()
+            else None
+        )
+        cases = load_cases_local(
+            pred_dir, gt_images_dir, masks_dir, precon_dir
+        )
+
+    if not cases:
+        print("ERROR: no valid cases found.", file=sys.stderr)
+        write_metrics({"case": {}, "aggregates": {}}, metrics_path)
+        return 1
+
+    n_mask = sum(1 for c in cases if c.mask is not None)
+    n_pre = sum(1 for c in cases if c.precontrast is not None)
+    print(
+        f"  Cases: {len(cases)}, "
+        f"with masks: {n_mask}, "
+        f"with pre-contrast: {n_pre}"
+    )
+
+    # ---- Run evaluation ----------------------------------------------
+    metrics = run_evaluation(cases, models_dir)
+    write_metrics(metrics, metrics_path)
+
+    # ---- Summary -----------------------------------------------------
+    print(f"\nMetrics written to {metrics_path}")
+    agg = metrics.get("aggregates", {})
+    if agg:
+        print("\n--- Aggregates ---")
+        for key in sorted(agg):
+            val = agg[key]
+            if "mean" in val:
+                std = val.get("std", 0.0)
+                print(f"  {key}: {val['mean']:.4f} (±{std:.4f})")
+            else:
+                print(f"  {key}: {val}")
+
+    print("=" * 50)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
