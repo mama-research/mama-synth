@@ -39,8 +39,15 @@ mama-synth/
 ```
 
 ---
-
 ## ⚡ Quick Start
+
+Clone the repository and install the required libraries:
+
+```
+git clone https://github.com/mama-research/mama-synth.git
+
+pip install -r requirements.txt
+```
 
 ### 1️⃣ Preprocessing
 
@@ -150,4 +157,10 @@ segmentation_dir/
 | **Segmentation** | Dice | per-case | Sørensen–Dice coefficient |
 | | HD95 | per-case | 95th-percentile Hausdorff distance |
 |
+
+## 🙏 Acknowledgements
+
+This challenge is supported by the [AIMED](https://www.bcn-aim.org/aimed/) and [FUTURE-ES](https://www.bcn-aim.org/future-es/) projects (Ministry of Science, Spain) and the European Union's Horizon Europe programme ([RadioVal](https://radioval.eu/) and [ODELIA](https://odelia.ai/)).
+
+![Acknowledgements](./assets/acknowledgements.jpg)
 
