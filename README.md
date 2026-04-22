@@ -1,46 +1,146 @@
 
-# MAMA-SYNTH 2026
+# 🏥 MAMA-SYNTH 2026
 
-Synthesizing Virtual Contrast-Enhancement in Breast MRI
+🧠 Synthesizing Virtual Contrast-Enhancement in Breast MRI
 
 MAMA-SYNTH is a challenge focused on synthesizing virtual post-contrast breast MRI from pre-contrast T1-weighted MRI. The benchmark is designed to support the development of clinically meaningful contrast-reduced and contrast-free breast MRI workflows.
 
-🔗 Official website: MAMA-SYNTH Challenge
-
 Dynamic contrast-enhanced MRI (DCE-MRI) plays a central role in breast cancer diagnosis, treatment planning, and disease monitoring. However, the use of gadolinium-based contrast agents introduces important concerns related to patient safety, environmental contamination, and accessibility of advanced imaging workflows. MAMA-SYNTH provides a standardized evaluation framework for generative models that aim to recover diagnostically relevant post-contrast information from non-contrast acquisitions.
 
-This challenge is intended to support fair and open comparison of synthesis methods across institutions, imaging settings, and downstream clinical objectives.
+🔗 Visit our [Website](https://www.ub.edu/mama-synth/) for more information and 📢 participate on [Grand Challenge](https://mamasynth.grand-challenge.org/).
 
 ---
 
-## Project Structure & Main Files
+## 📁 Repository Structure
 
-- **src/evaluation/evaluate.py**: Main evaluation pipeline. Loads predictions and ground truth, runs all evaluators (image, ROI, classification, segmentation), and writes metrics. Integrates nnUNetv2 for segmentation inference with robust log/warning suppression.
-- **src/preprocessing/compute_dataset_stats.py**: Computes global mean and standard deviation for pre-contrast normalization using Welford's algorithm. Outputs a JSON file for reproducible normalization.
-- **src/preprocessing/preprocess.py**: Preprocessing pipeline. Extracts 2D pre-contrast and peak-enhancement slices, applies z-score normalization, saves MHA/PNG outputs, and generates a CSV report.
-- **src/evaluation/models/**: Contains pre-trained classifier models and (optionally) nnUNet segmentation weights.
-
-
-## Getting Started
-
-1. **Preprocessing**: Use `preprocess.py` to extract and normalize 2D slices from 3D DCE-MRI volumes.
-2. **Evaluation**: Run `evaluate.py` to score predictions against ground truth using the standardized metrics.
-
-See the `src/evaluation/README.md` for detailed usage, directory layout, and metric descriptions.
+```
+mama-synth/
+├── src/
+│   ├── preprocessing/
+│   │   ├── preprocess.py               ← 3D DCE-MRI → 2D slice extraction & normalisation
+│   │   ├── compute_dataset_stats.py    ← Global pre-contrast normalisation statistics
+│   │   └── training_pre_stats.json     ← Pre-computed dataset stats (mean, std)
+│   └── evaluation/
+│       ├── evaluate.py                 ← GC entry point + case discovery + pipeline orchestrator
+│       ├── evaluators/
+│       │   ├── base.py                 ← Case, EvaluationResult, BaseEvaluator ABC
+│       │   ├── image_metrics.py        ← ImageMetricsEvaluator   (MSE, LPIPS)
+│       │   ├── roi_metrics.py          ← ROIMetricsEvaluator      (SSIM-ROI, FRD)
+│       │   ├── classification.py       ← ClassificationEvaluator  (AUROC × 2)
+│       │   ├── segmentation.py         ← SegmentationEvaluator    (Dice, HD95)
+│       │   └── mirror_utils.py         ← Midline detection + contralateral mask mirroring
+│       ├── models/                     ← Bundled classifier .pkl files & nnUNet weights
+│       ├── ground_truth/               ← GT data for Docker test runs
+│       ├── Dockerfile
+│       ├── do_build.sh
+│       ├── do_test_run.sh
+│       └── do_save.sh
+└── README.md                             ← this file
+```
 
 ---
 
-# MAMA-SYNTH Grand Challenge Evaluation Container
+## ⚡ Quick Start
 
-Minimal, modular evaluation pipeline for the MAMA-SYNTH challenge on
-[Grand Challenge](https://grand-challenge.org/).  Evaluates synthetic
-post-contrast breast DCE-MRI slices against real ground truth across
-four metric groups.
+### 1️⃣ Preprocessing
 
-## Metric Groups
+Convert 3D DCE-MRI volumes to 2D pre-contrast and peak-enhancement slices ready for the challenge.
+
+**Step 1️⃣ — Compute dataset-level normalisation statistics** (once, on training data):
+
+This steps has already been performed and the normalization statistics can be found `/src/preprocessing/training_pre_stats.json`. To reproduce the statistics on the MAMA-MIA training dataset:
+
+```bash
+python src/preprocessing/compute_dataset_stats.py \
+    --image_dir /path/to/3d_images \
+    --output_path src/preprocessing/training_pre_stats.json
+```
+
+**Step 2️⃣ — Preprocess images**:
+
+```bash
+python src/preprocessing/preprocess.py \
+    --image_dir /path/to/3d_images \
+    --seg_dir   /path/to/segmentations \
+    --output_dir /path/to/output \
+    --global_stats src/preprocessing/training_pre_stats.json
+```
+
+Output layout:
+
+```
+output/
+    mha/
+        input/          ← pre-contrast 2-D .mha slices
+        ground_truth/   ← peak-enhancement 2-D .mha slices
+        mask/           ← tumour segmentation 2-D .mha slices
+    png/                ← visualisation (same structure)
+    intensity_plots/    ← per-patient intensity comparison plots
+    report.csv          ← per-patient preprocessing report
+```
+
+Note: PNGs are only for visualization and do not use the normalization required by the challenge evaluation.
+### 2️⃣ Evaluation
+
+Score synthetic predictions against ground truth.
+
+**💻 Local development** — set environment variables and run:
+
+```bash
+export MAMA_PREDICTIONS_DIR=/path/to/predictions
+export MAMA_PRECONTRAST_DIR=/path/to/input 
+export MAMA_GT_DIR=/path/to/ground_truth   
+export MAMA_MASKS_DIR=/path/to/mask
+export MAMA_MODELS_DIR=/path/to/models
+export MAMA_OUTPUT_DIR=/path/to/output
+
+python src/evaluation/evaluate.py
+```
+
+---
+
+## 🔬 Preprocessing in Detail
+
+`preprocess.py` implements the full 3D → 2D pipeline:
+
+1. **Phase discovery** — identifies all DCE phases per patient from filename suffixes (`patient_id_<phase_index>.nii.gz`).
+2. **Peak enhancement selection** — selects the phase with the highest mean tumour intensity in 3D.
+3. **Slice selection** — picks the 2D slice with the largest tumour area along the shortest axis.
+4. **Z-score normalisation** — applies dataset-level statistics (from `compute_dataset_stats.py`) to both the pre-contrast and peak-enhancement slices for reproducible, bias-free normalisation.
+5. **Output** — saves `.mha` and `.png` files and an intensity comparison plot per patient.
+
+**Expected input layout:**
+
+```
+image_dir/
+    <patient_id>/
+        <patient_id>_0.nii.gz   ← pre-contrast (lowest index)
+        <patient_id>_1.nii.gz
+        ...
+segmentation_dir/
+    <patient_id>.nii.gz
+```
+
+**Key arguments:**
+
+| Argument | Description |
+|---|---|
+| `--image_dir` | Root directory with per-patient phase volumes |
+| `--seg_dir` | Directory with per-patient segmentation files |
+| `--output_dir` | Root output directory |
+| `--global_stats` | Path to JSON with `mean` and `std` for z-score normalisation |
+| `--csv_name` | Output CSV report filename (default: `report.csv`) |
+
+---
+
+## 📊 Evaluation in Detail
+
+`evaluate.py` is the main evaluation entry point. It loads cases, runs four evaluators, and writes a `metrics.json`.
+
+### 📈 Metric Groups
 
 | Group | Metric | Scope | Description |
-|-------|--------|-------|-------------|
+|---|---|---|---|
 | **Image-to-Image** | MSE | per-case | Mean Squared Error |
 | | LPIPS | per-case | Learned Perceptual Image Patch Similarity |
 | **ROI-to-ROI** | SSIM (tumour) | per-case | Structural Similarity within the tumour mask |
@@ -49,85 +149,5 @@ four metric groups.
 | | AUROC tumour-ROI | aggregate | Tumour ROI vs mirrored-ROI classifier AUROC |
 | **Segmentation** | Dice | per-case | Sørensen–Dice coefficient |
 | | HD95 | per-case | 95th-percentile Hausdorff distance |
+|
 
-## Directory Layout (Grand Challenge)
-
-```
-/input/
-    predictions.json                        ← algorithm job manifest
-    {job_pk}/output/images/{slug}/*.mha     ← one synthetic slice per job
-
-/opt/ml/input/data/ground_truth/
-    images/          ← real post-contrast 2-D .mha slices
-    masks/           ← binary tumour segmentation masks .mha
-    precontrast/     ← real pre-contrast 2-D .mha slices
-
-/opt/app/models/
-    contrast_classifier.pkl                 ← pre-trained contrast CLF
-    tumor_roi_classifier.pkl                ← pre-trained tumour-ROI CLF
-    segmentation/                           ← (optional) nnUNet weights
-
-/output/
-    metrics.json                            ← evaluation output
-```
-
-## Local Development
-
-Set environment variables to override GC paths:
-
-```bash
-export MAMA_PREDICTIONS_DIR=/path/to/predictions
-export MAMA_GT_DIR=/path/to/ground_truth          # contains images/, masks/, precontrast/
-export MAMA_MASKS_DIR=/path/to/masks               # or auto-detected from GT_DIR/masks
-export MAMA_PRECONTRAST_DIR=/path/to/precontrast   # or auto-detected from GT_DIR/precontrast
-export MAMA_OUTPUT_DIR=/path/to/output
-export MAMA_MODELS_DIR=/path/to/models
-
-python evaluate.py
-```
-
-## Docker
-
-```bash
-./do_build.sh          # Build the container
-./do_test_run.sh       # Run against test/ data
-./do_save.sh           # Export .tar.gz for GC upload
-```
-
-## Testing
-
-```bash
-python3 -m pytest tests/ -v
-```
-
-## Architecture
-
-```
-evaluate.py              ← GC entry point + case discovery
-evaluators/
-    base.py              ← Case, EvaluationResult, BaseEvaluator ABC
-    image_metrics.py     ← ImageMetricsEvaluator   (MSE, LPIPS)
-    roi_metrics.py       ← ROIMetricsEvaluator      (SSIM-ROI, FRD)
-    classification.py    ← ClassificationEvaluator   (AUROC × 2)
-    segmentation.py      ← SegmentationEvaluator     (Dice, HD95)
-    mirror_utils.py      ← midline detection + contralateral mask mirroring
-models/                  ← bundled classifier .pkl files
-ground_truth/            ← GT data for Docker test runs
-```
-
-## GC Leaderboard JSON Paths
-
-Configure in **Admin → Phase → Scoring**:
-
-| Metric | Score jsonpath | Error jsonpath |
-|--------|---------------|----------------|
-| MSE | `aggregates.mse.mean` | `aggregates.mse.std` |
-| LPIPS | `aggregates.lpips.mean` | `aggregates.lpips.std` |
-| SSIM (tumour) | `aggregates.ssim_tumor.mean` | `aggregates.ssim_tumor.std` |
-| FRD | `aggregates.frd.mean` | — |
-| AUROC contrast | `aggregates.auroc_contrast.mean` | — |
-| AUROC tumour-ROI | `aggregates.auroc_tumor_roi.mean` | — |
-| Dice | `aggregates.dice.mean` | `aggregates.dice.std` |
-| HD95 | `aggregates.hausdorff_95.mean` | `aggregates.hausdorff_95.std` |
-
-For more information, visit the official challenge website or consult the code documentation in each module.
