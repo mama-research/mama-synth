@@ -16,6 +16,8 @@ Dynamic contrast-enhanced MRI (DCE-MRI) plays a central role in breast cancer di
 ```
 mama-synth/
 ├── src/
+│   ├── baseline/
+│   │   └── baseline.py                 ← Pix2PixHD synthesis via medigan
 │   ├── preprocessing/
 │   │   ├── preprocess.py               ← 3D DCE-MRI → 2D slice extraction & normalisation
 │   │   ├── compute_dataset_stats.py    ← Global pre-contrast normalisation statistics
@@ -87,7 +89,31 @@ output/
 ```
 
 Note: PNGs are only for visualization and do not use the normalization required by the challenge evaluation.
-### 2️⃣ Evaluation
+### 2️⃣ Baseline Synthesis
+
+🍋 TO DO: Make baseline MAMA-SYNTH NORMALIZATION COMPATIBLE.
+
+Run the Pix2PixHD baseline model on the preprocessed pre-contrast `.mha` slices to generate synthetic post-contrast images:
+
+```bash
+python src/baseline/baseline.py \
+    --input-dir  /path/to/output/mha/input \
+    --output-dir /path/to/synthetic
+```
+
+Optional arguments:
+
+| Argument | Default | Description |
+|---|---|---|
+| `--model-id` | `00023_PIX2PIXHD_BREAST_DCEMRI` | Medigan model identifier |
+| `--gpu-id` | `0` | GPU device (`0`, `cuda:0`, `-1` for CPU) |
+| `--image-size` | `512` | Model input resolution |
+| `--keep-work-dir` | — | Retain intermediate staging files |
+| `--verbose` | — | Enable DEBUG logging |
+
+Output: a flat directory of synthetic `.png` files named `{patient_id}.png`.
+
+### 3️⃣ Evaluation
 
 Score synthetic predictions against ground truth.
 
