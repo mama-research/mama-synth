@@ -332,7 +332,7 @@ class ClassificationEvaluator(BaseEvaluator):
         ensemble: bool = False,
     ) -> None:
         self.ensemble = ensemble
-        self.models_dir = models_dir
+        self.models_dir = models_dir / "classification" if models_dir is not None else None
 
         # -- Contrast classifier(s) -----------------------------------
         self.contrast_clf: Optional[

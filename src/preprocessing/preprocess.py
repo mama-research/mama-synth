@@ -220,7 +220,7 @@ class Preprocessor:
             patient_id = patient_folder.name
             phase_files = []
 
-            for file_path in sorted(os.listdir(patient_folder.iterdir())):
+            for file_path in sorted(patient_folder.iterdir()):
                 if file_path.is_file() and file_path.suffix in ('.nii', '.gz', '.mha'):
                     stem = file_path.stem.replace('.nii', '')
                     parts = stem.rsplit('_', 1)

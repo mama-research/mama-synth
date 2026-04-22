@@ -242,25 +242,106 @@ def _gc_input_image_name(job: dict) -> Optional[str]:
 def load_segmentation_model(
     models_dir: Optional[Path],
 ) -> Optional[object]:
-    """Return a segmentation callable, or ``None`` if unavailable.
+    """Load a single-fold nnUNet segmentation model from *models_dir/segmentation*.
 
-    Replace this stub with your nnUNet / custom model loader.
-    The callable must accept a 2-D ``float64`` array (z-score
-    normalised) and return a binary ``bool`` mask.
+    Returns a callable that accepts a 2-D ``float64`` array and returns
+    a binary ``bool`` mask, or ``None`` if the model directory is absent
+    or nnunetv2 is not installed.
     """
     if models_dir is None:
         return None
     seg_dir = models_dir / "segmentation"
     if not seg_dir.exists():
         return None
-    # TODO: Load nnUNet or custom segmentation model from *seg_dir*.
-    #       Example:
-    #
-    #   from my_segmenter import Segmenter
-    #   model = Segmenter.load(seg_dir)
-    #   return model.predict   # must return bool ndarray
-    #
-    return None
+
+    try:
+        # Set nnUNet environment variables to dummy paths to suppress warnings
+        os.environ["nnUNet_raw"] = "/tmp/nnunet_raw"
+        os.environ["nnUNet_preprocessed"] = "/tmp/nnunet_preprocessed"
+        os.environ["nnUNet_results"] = "/tmp/nnunet_results"
+        import logging
+        import torch
+        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+    except ImportError:
+        print(
+            "WARNING: nnunetv2 not installed — segmentation evaluator disabled.",
+            file=sys.stderr,
+        )
+        return None
+
+    # Suppress nnunetv2 logging
+    logging.getLogger("nnunetv2").setLevel(logging.WARNING)
+    logging.getLogger("batchgenerators").setLevel(logging.WARNING)
+    logging.getLogger("acvl_utils").setLevel(logging.WARNING)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=True,
+        perform_everything_on_device=True,
+        device=device,
+        verbose=False,
+        allow_tqdm=False,
+    )
+
+    # Load a single fold (fold 0); override via MAMA_SEG_FOLD env var
+    fold_str = os.environ.get("MAMA_SEG_FOLD", "0")
+    fold = int(fold_str) if fold_str.isdigit() else fold_str
+    predictor.initialize_from_trained_model_folder(
+        str(seg_dir),
+        use_folds=(fold,),
+        checkpoint_name="checkpoint_final.pth",
+    )
+    print(f"  Segmentation model loaded from {seg_dir} (fold {fold}, device {device})")
+
+    import tempfile
+    import SimpleITK as sitk
+    from contextlib import redirect_stdout, redirect_stderr
+    from io import StringIO
+
+    def segment_fn(image: np.ndarray) -> np.ndarray:
+        """Run nnUNet inference on a single 2-D image."""
+        arr = image.astype(np.float32)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, :, :]  # add Z dim for nnUNet
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_dir = Path(tmpdir) / "input"
+            out_dir = Path(tmpdir) / "output"
+            in_dir.mkdir()
+            out_dir.mkdir()
+
+            sitk.WriteImage(
+                sitk.GetImageFromArray(arr),
+                str(in_dir / "case_0000.nii.gz"),
+            )
+
+            # Suppress stdout/stderr during inference
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                predictor.predict_from_files(
+                    str(in_dir),
+                    str(out_dir),
+                    save_probabilities=False,
+                    overwrite=True,
+                    num_processes_preprocessing=1,
+                    num_processes_segmentation_export=1,
+                )
+
+            pred_path = out_dir / "case.nii.gz"
+            if not pred_path.exists():
+                return np.zeros(image.shape, dtype=bool)
+
+            pred = sitk.GetArrayFromImage(sitk.ReadImage(str(pred_path)))
+
+        mask = pred > 0
+        if image.ndim == 2 and mask.ndim == 3:
+            mask = mask[0]
+        return mask.astype(bool)
+
+    return segment_fn
 
 
 # ======================================================================
@@ -288,17 +369,17 @@ def run_evaluation(
             "Classification",
             ClassificationEvaluator(
                 contrast_model=(
-                    models_dir / "contrast_classifier.pkl"
+                    models_dir / "classification"/ "contrast_classifier.pkl"
                     if models_dir
                     else None
                 ),
                 tumor_roi_model=(
-                    models_dir / "tumor_roi_classifier.pkl"
+                    models_dir / "classification"/ "tumor_roi_classifier.pkl"
                     if models_dir
                     else None
                 ),
                 models_dir=models_dir,
-                ensemble=ensemble,
+                ensemble=True,
             ),
         ),
         (
@@ -313,6 +394,7 @@ def run_evaluation(
     all_aggregates: dict[str, dict[str, float]] = {}
 
     for name, evaluator in evaluators:
+        print(f"[INFO] Running evaluator: {name}")
         try:
             result = evaluator.evaluate(cases)  # type: ignore[attr-defined]
             for cid, m in result.per_case.items():
