@@ -1,7 +1,7 @@
 
 # 🏥 MAMA-SYNTH 2026
 
-🧠 Synthesizing Virtual Contrast-Enhancement in Breast MRI
+Synthesizing Virtual Contrast-Enhancement in Breast MRI 🎗️
 
 MAMA-SYNTH is a challenge focused on synthesizing virtual post-contrast breast MRI from pre-contrast T1-weighted MRI. The benchmark is designed to support the development of clinically meaningful contrast-reduced and contrast-free breast MRI workflows.
 
