@@ -390,6 +390,12 @@ class ClassificationEvaluator(BaseEvaluator):
     ) -> Optional[float]:
         """AUROC: synthetic-post (label 1) vs real-precontrast (label 0).
 
+        Radiomic features are extracted from the **tumour ROI** defined by
+        ``case.mask``, matching the region used during classifier training
+        (see ``create_contrast_dataset`` in ``mama-synth-eval``).  When no
+        mask is available for a case, the whole image is used as a fallback
+        and a warning is emitted — absent masks degrade AUROC reliability.
+
         Returns ``None`` if fewer than 4 feature vectors are available
         (minimum required for a meaningful binary AUROC: at least one
         sample per class with one extra each to avoid degenerate ROC).
@@ -400,13 +406,25 @@ class ClassificationEvaluator(BaseEvaluator):
         for case in cases:
             if case.precontrast is None:
                 continue
+            # Use the tumour mask if available — this is the ROI the
+            # classifier was trained on.  Fall back to whole image with a
+            # warning so that cases without masks are not silently dropped.
+            if case.mask is not None and np.any(case.mask):
+                roi_mask = case.mask
+            else:
+                roi_mask = np.ones(case.prediction.shape, dtype=bool)
+                print(
+                    f"WARNING: no tumour mask for {case.case_id}; "
+                    "using whole-image features for contrast AUROC. "
+                    "Results may be unreliable.",
+                    file=sys.stderr,
+                )
             try:
-                whole = np.ones(case.prediction.shape, dtype=bool)
                 sf = extract_radiomic_features_cached(
-                    case.prediction, whole
+                    case.prediction, roi_mask
                 )
                 pf = extract_radiomic_features_cached(
-                    case.precontrast, whole
+                    case.precontrast, roi_mask
                 )
                 if sf.size == 0 or pf.size == 0:
                     continue

@@ -13,8 +13,8 @@ four metric groups.
 | | LPIPS | per-case | Learned Perceptual Image Patch Similarity |
 | **ROI-to-ROI** | SSIM (tumour) | per-case | Structural Similarity within the tumour mask |
 | | FRD | aggregate | Fréchet Radiomics Distance (mask-region features) |
-| **Classification** | AUROC contrast | aggregate | Pre-vs-post contrast classifier AUROC |
-| | AUROC tumour-ROI | aggregate | Tumour ROI vs mirrored-ROI classifier AUROC |
+| **Classification** | AUROC contrast | aggregate | Pre-vs-post contrast classifier AUROC (tumour-ROI features) |
+| | AUROC tumour-ROI | aggregate | Tumour ROI vs mirrored-ROI classifier AUROC (tumour-ROI features) |
 | **Segmentation** | Dice | per-case | Sørensen–Dice coefficient |
 | | HD95 | per-case | 95th-percentile Hausdorff distance |
 
@@ -82,6 +82,27 @@ evaluators/
 models/                  ← bundled classifier .pkl files
 ground_truth/            ← GT data for Docker test runs
 ```
+
+## Classification Feature Extraction
+
+Both AUROC metrics use the **tumour segmentation mask** as the region of
+interest for radiomic feature extraction — this matches the region used
+when training the classifiers in `mama-synth-eval`.
+
+| Task | Prediction image | Pre-contrast image | Mask used |
+|------|-----------------|-------------------|-----------|
+| AUROC contrast | `case.prediction` | `case.precontrast` | tumour mask (`case.mask`) |
+| AUROC tumour-ROI | `case.prediction` | `case.prediction` | tumour mask **and** anatomically mirrored mask |
+
+**Contrast task fallback:** if a case has no tumour mask (`case.mask is
+None` or all-zero), whole-image features are used with a `WARNING` printed
+to stderr.  This keeps the case in the AUROC computation but may reduce
+reliability; ensure all test cases have valid masks for best results.
+
+**Important:** the `.pkl` classifiers must have been trained on features
+extracted from the tumour ROI (using `--slice-mode max_tumor` or similar in
+`mama-synth-eval`).  Training on whole-image features and evaluating on
+tumour-ROI features (or vice versa) will produce AUROC ≈ 0.5.
 
 ## GC Leaderboard JSON Paths
 

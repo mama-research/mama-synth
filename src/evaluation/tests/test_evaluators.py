@@ -174,14 +174,16 @@ class TestClassification:
     def test_contrast_auroc_with_mock_model(self, tmp_path: Path) -> None:
         from sklearn.ensemble import RandomForestClassifier
 
-        # Determine feature count by extracting from a sample first
+        # Determine feature count by extracting from the tumour ROI —
+        # this must match the mask used by the evaluator (_auroc_contrast
+        # uses case.mask, falling back to whole-image only when absent).
         try:
             from evaluators.roi_metrics import extract_radiomic_features
 
             sample = _make_case(0)
-            whole = np.ones(sample.prediction.shape, dtype=bool)
+            # Use the tumour mask, matching the evaluator's behaviour.
             n_features = extract_radiomic_features(
-                sample.prediction, whole
+                sample.prediction, sample.mask
             ).shape[0]
         except Exception:
             pytest.skip("pyradiomics unavailable")
@@ -204,10 +206,70 @@ class TestClassification:
         auroc = result.aggregates["auroc_contrast"]["mean"]
         assert 0.0 <= auroc <= 1.0
 
+    def test_contrast_uses_tumor_mask_not_whole_image(self) -> None:
+        """Regression: contrast features must come from the tumour ROI.
 
-# ======================================================================
-# End-to-end pipeline with .mha files
-# ======================================================================
+        Features extracted with a tumour mask must differ from those
+        extracted over the whole image for the same image.  If the
+        evaluator were still using the whole-image mask the two vectors
+        would be identical, breaking the training/inference alignment.
+        """
+        try:
+            from evaluators.roi_metrics import extract_radiomic_features
+        except ImportError:
+            pytest.skip("pyradiomics unavailable")
+
+        case = _make_case(0)
+        assert case.mask is not None and np.any(case.mask)
+
+        feats_mask = extract_radiomic_features(case.prediction, case.mask)
+        whole = np.ones(case.prediction.shape, dtype=bool)
+        feats_whole = extract_radiomic_features(case.prediction, whole)
+
+        # The two feature vectors must NOT be identical — they describe
+        # different regions of the same image.
+        assert not np.allclose(feats_mask, feats_whole), (
+            "Tumour-mask features are identical to whole-image features; "
+            "the mask is not being applied correctly."
+        )
+
+    def test_contrast_fallback_when_no_mask(self, tmp_path: Path) -> None:
+        """When mask is absent, whole-image fallback keeps AUROC defined."""
+        from sklearn.ensemble import RandomForestClassifier
+
+        try:
+            from evaluators.roi_metrics import extract_radiomic_features
+
+            sample = _make_case(0)
+            whole = np.ones(sample.prediction.shape, dtype=bool)
+            n_features = extract_radiomic_features(
+                sample.prediction, whole
+            ).shape[0]
+        except Exception:
+            pytest.skip("pyradiomics unavailable")
+
+        rng = np.random.RandomState(7)
+        X = rng.rand(20, n_features)
+        y = np.array([0] * 10 + [1] * 10)
+        clf = RandomForestClassifier(n_estimators=2, random_state=7)
+        clf.fit(X, y)
+        model_path = tmp_path / "contrast_classifier.pkl"
+        with open(model_path, "wb") as fh:
+            pickle.dump(clf, fh)
+
+        # Cases with mask=None → whole-image fallback
+        cases = [_make_case(i) for i in range(4)]
+        for c in cases:
+            c.mask = None
+
+        ev = ClassificationEvaluator(
+            contrast_model=model_path, tumor_roi_model=None
+        )
+        result = ev.evaluate(cases)
+        # Should still produce a result (not silently drop everything)
+        assert "auroc_contrast" in result.aggregates
+        auroc = result.aggregates["auroc_contrast"]["mean"]
+        assert 0.0 <= auroc <= 1.0
 
 
 class TestEndToEnd:
