@@ -378,8 +378,8 @@ def run_evaluation(
                     if models_dir
                     else None
                 ),
-                models_dir=models_dir,
-                ensemble=True,
+                models_dir=models_dir / "classification",
+                ensemble=ensemble
             ),
         ),
         (

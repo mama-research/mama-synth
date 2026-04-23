@@ -5,9 +5,9 @@
 
 MAMA-SYNTH is a challenge focused on synthesizing virtual post-contrast breast MRI from pre-contrast T1-weighted MRI. The benchmark is designed to support the development of clinically meaningful contrast-reduced and contrast-free breast MRI workflows.
 
-Dynamic contrast-enhanced MRI (DCE-MRI) plays a central role in breast cancer diagnosis, treatment planning, and disease monitoring. However, the use of gadolinium-based contrast agents introduces important concerns related to patient safety, environmental contamination, and accessibility of advanced imaging workflows. MAMA-SYNTH provides a standardized evaluation framework for generative models that aim to recover diagnostically relevant post-contrast information from non-contrast acquisitions.
+Dynamic contrast-enhanced MRI (DCE-MRI) plays a central role in breast cancer diagnosis, treatment planning, and disease monitoring. However, the use of gadolinium-based contrast agents introduces important concerns related to patient safety, environmental contamination, and accessibility of advanced imaging workflows. MAMA-SYNTH provides a standardized evaluation framework for generative models that aim to recover diagnostically relevant post-contrast information from non-contrast acquisition.
 
-🔗 Visit our [Website](https://www.ub.edu/mama-synth/) for more information and 📢 participate on [Grand Challenge](https://mamasynth.grand-challenge.org/).
+### 🔗 Visit our [Website](https://www.ub.edu/mama-synth/) for more information and 📢 participate on [Grand Challenge](https://mamasynth.grand-challenge.org/).
 
 ---
 
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 Convert 3D DCE-MRI volumes to 2D pre-contrast and peak-enhancement slices ready for the challenge.
 
-**Step 1️⃣ — Compute dataset-level normalisation statistics** (once, on training data):
+**Step 1: Compute dataset-level normalisation statistics** (once, on training data):
 
 This steps has already been performed and the normalization statistics can be found `/src/preprocessing/training_pre_stats.json`. To reproduce the statistics on the MAMA-MIA training dataset:
 
@@ -65,7 +65,7 @@ python src/preprocessing/compute_dataset_stats.py \
     --output_path src/preprocessing/training_pre_stats.json
 ```
 
-**Step 2️⃣ — Preprocess images**:
+**Step 2: Preprocess images**:
 
 ```bash
 python src/preprocessing/preprocess.py \
@@ -88,7 +88,8 @@ output/
     report.csv          ← per-patient preprocessing report
 ```
 
-Note: PNGs are only for visualization and do not use the normalization required by the challenge evaluation.
+#### ⚠️Note: PNGs are only for visualization and are not normalized as required by the challenge evaluation.
+
 ### 2️⃣ Baseline Synthesis
 
 🍋 TO DO: Make baseline MAMA-SYNTH NORMALIZATION COMPATIBLE.
@@ -117,8 +118,13 @@ Output: a flat directory of synthetic `.png` files named `{patient_id}.png`.
 
 Score synthetic predictions against ground truth.
 
-**💻 Local development** — set environment variables and run:
+**💻 Local evaluation** 
 
+**Step 1: Add evaluation models**:
+
+The pretrained classification and segmentation models need to be added to `/src/evaluation/models` to run the complete evaluation. **[Download Weights](https://drive.google.com/file/d/1rliFnr-mNtISkJA0etm1dDBLdbHB3d4h/view) ⬇️**
+
+**Step 2: Set environment variables and run**:
 ```bash
 export MAMA_PREDICTIONS_DIR=/path/to/predictions
 export MAMA_PRECONTRAST_DIR=/path/to/input 
@@ -126,6 +132,7 @@ export MAMA_GT_DIR=/path/to/ground_truth
 export MAMA_MASKS_DIR=/path/to/mask
 export MAMA_MODELS_DIR=/path/to/models
 export MAMA_OUTPUT_DIR=/path/to/output
+export MAMA_ENSEMBLE=True
 
 python src/evaluation/evaluate.py
 ```
