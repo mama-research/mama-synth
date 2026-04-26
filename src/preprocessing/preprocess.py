@@ -302,7 +302,7 @@ class Preprocessor:
         patient_phases = self.get_patient_phases()
         logger.info(f"Found {len(patient_phases)} patients")
 
-        for num, (patient_id, phase_files) in enumerate(patient_phases.items(), start=1):
+        for patient_id, phase_files in patient_phases.items():
             try:
                 # --- load segmentation ---
                 seg_file = self.segmentation_dir / f"{patient_id}.nii.gz"
@@ -384,10 +384,7 @@ class Preprocessor:
             except Exception as e:
                 logger.error(f"Error processing {patient_id}: {e}")
                 continue
-            if num == 50:
-                logger.info("Stopping after 50 patients for testing purposes.")
-                break
-
+  
         return pd.DataFrame(self.results)
 
     def save_report(self, df_results: pd.DataFrame) -> None:
