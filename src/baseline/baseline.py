@@ -78,12 +78,27 @@ def synthesize_with_medigan(
     gpu_id: str = "0",
     image_size: int = 512,
     keep_work_dir: bool = False,
+    lo_percentile: float = 5.0,
+    hi_percentile: float = 95.0,
 ) -> list[Path]:
     """Run Pix2PixHD synthesis on a directory of 2D MHA images.
 
     Each MHA file in *input_dir* is converted to an 8-bit grayscale PNG,
-    passed through medigan, and the synthetic output is saved to *output_dir*.
-    Returns paths to all generated PNG files.
+    passed through medigan, and the synthetic output is rescaled to z-score
+    float space using a fully per-patient linear mapping derived from the
+    pre-contrast input:
+
+        scale = (P_hi(input) - P_lo(input)) / (P_hi(raw) - P_lo(raw))
+        shift = P_lo(input) - scale * P_lo(raw)
+
+    This maps the model's output range onto the input's z-score range so that
+    background tissue is anchored to the patient's own acquisition level and
+    the contrast enhancement above it is whatever the model predicted,
+    expressed in the same z-score units as the input.  No external calibration
+    file is required.
+
+    A visualization PNG (0–255, per-image min–max) is also written to
+    ``output_dir/viz/``.  Returns paths to all generated MHA files.
     """
     try:
         from medigan import Generators
@@ -95,6 +110,8 @@ def synthesize_with_medigan(
     generators = Generators()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    viz_dir = output_dir / "viz"
+    viz_dir.mkdir(exist_ok=True)
     work_root = output_dir / WORK_SUBDIR
     work_root.mkdir(exist_ok=True)
 
@@ -129,12 +146,14 @@ def synthesize_with_medigan(
                 arr = arr[0]
             elif arr.ndim != 2:
                 raise ValueError(f"Expected 2D MHA, got shape {arr.shape} for {img_path.name}")
-
+            # pre contrast which is z-score normalized
             native_size = (arr.shape[1], arr.shape[0])  # (width, height) for PIL
             vmin, vmax = arr.min(), arr.max()
+            # re  normalized to 0-255
             norm = ((arr - vmin) / (vmax - vmin) * 255).astype(np.uint8) if vmax > vmin else np.zeros_like(arr, dtype=np.uint8)
             PILImage.fromarray(norm, mode="L").save(work_input / "slice_0000.png")
 
+            # goes into the generator
             generators.generate(
                 model_id=model_id,
                 input_path=str(work_input),
@@ -144,16 +163,41 @@ def synthesize_with_medigan(
                 image_size=str(image_size),
                 gpu_id=device_str,
             )
-
+            
             produced = sorted(_find_generated_images(work_output))
-            dest = output_dir / f"{patient_id}.png"
             with PILImage.open(produced[0]) as out_img:
                 if out_img.size != native_size:
                     out_img = out_img.resize(native_size, PILImage.BICUBIC)
-                out_img.save(dest)
+                raw = np.array(out_img.convert("L"), dtype=np.float32)
 
-            generated_files.append(dest)
-            logger.debug(f"Generated: {dest}")
+            # Per-patient linear rescaling: map model output range onto input z-score range.
+            # scale stretches the output to match the input's dynamic range;
+            # shift anchors the background to the patient's own pre-contrast level.
+            p_lo_in  = float(np.percentile(arr, lo_percentile))
+            p_hi_in  = float(np.percentile(arr, hi_percentile))
+            p_lo_raw = float(np.percentile(raw, lo_percentile))
+            p_hi_raw = float(np.percentile(raw, hi_percentile))
+            denom = p_hi_raw - p_lo_raw
+            if denom == 0.0:
+                raise ValueError("Model output has zero dynamic range — cannot rescale.")
+            scale = (p_hi_in - p_lo_in) / denom
+            shift = p_lo_in - scale * p_lo_raw
+            z_hat = (scale * raw + shift).astype(np.float32)
+
+            # Primary output: float32 MHA
+            dest_mha = output_dir / f"{patient_id}.mha"
+            sitk.WriteImage(sitk.GetImageFromArray(z_hat), str(dest_mha))
+
+            # Visualization PNG: per-image min–max → 0–255
+            z_min, z_max = z_hat.min(), z_hat.max()
+            if z_max > z_min:
+                viz = ((z_hat - z_min) / (z_max - z_min) * 255).astype(np.uint8)
+            else:
+                viz = np.zeros_like(z_hat, dtype=np.uint8)
+            PILImage.fromarray(viz, mode="L").save(viz_dir / f"{patient_id}.png")
+
+            generated_files.append(dest_mha)
+            logger.debug(f"Generated: {dest_mha}")
 
             if not keep_work_dir:
                 shutil.rmtree(patient_work, ignore_errors=True)
@@ -167,7 +211,7 @@ def synthesize_with_medigan(
         except OSError:
             pass
 
-    logger.info(f"Done: {len(generated_files)} PNG(s) → {output_dir}")
+    logger.info(f"Done: {len(generated_files)} MHA(s) → {output_dir}  |  viz PNGs → {viz_dir}")
     return generated_files
 
 
@@ -190,6 +234,18 @@ def parse_synthesize_args(argv: Optional[list[str]] = None) -> argparse.Namespac
                         help="Model input resolution. Default: 512.")
     parser.add_argument("--keep-work-dir", action="store_true",
                         help="Keep intermediate staging directories after synthesis.")
+    parser.add_argument(
+        "--lo-percentile",
+        type=float,
+        default=5.0,
+        help="Lower percentile used for per-patient rescaling (default: 5.0).",
+    )
+    parser.add_argument(
+        "--hi-percentile",
+        type=float,
+        default=95.0,
+        help="Upper percentile used for per-patient rescaling (default: 95.0).",
+    )
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable DEBUG logging.")
 
@@ -197,7 +253,7 @@ def parse_synthesize_args(argv: Optional[list[str]] = None) -> argparse.Namespac
 
     if args.input_dir is None:
         if args.data_dir is not None:
-            args.input_dir = args.data_dir / IMAGES_SUBDIR
+            args.input_dir = args.data_dir
         else:
             parser.error("Provide --input-dir or --data-dir.")
 
@@ -218,8 +274,10 @@ def run_baseline(argv: Optional[list[str]] = None) -> None:
         gpu_id=args.gpu_id,
         image_size=args.image_size,
         keep_work_dir=args.keep_work_dir,
+        lo_percentile=args.lo_percentile,
+        hi_percentile=args.hi_percentile,
     )
-    logger.info(f"Generated {len(generated)} synthetic PNG(s).")
+    logger.info(f"Generated {len(generated)} synthetic MHA(s).")
 
 
 if __name__ == "__main__":

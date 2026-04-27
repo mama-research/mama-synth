@@ -400,6 +400,7 @@ def run_evaluation(
             for cid, m in result.per_case.items():
                 all_per_case.setdefault(cid, {}).update(m)
             all_aggregates.update(result.aggregates)
+            print(result.aggregates)
             n_agg = len(result.aggregates)
             print(f"  {name}: OK ({n_agg} aggregate metric(s))")
         except Exception as exc:
