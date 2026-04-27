@@ -191,6 +191,8 @@ segmentation_dir/
 | | HD95 | per-case | 95th-percentile Hausdorff distance |
 |
 
+Note that both classifiers use radiologist-verified **tumour segmentation mask** to extract radiomic features from the region of interest rather than full image features.
+
 ## 🙏 Acknowledgements
 
 This challenge is supported by the [AIMED](https://www.bcn-aim.org/aimed/) and [FUTURE-ES](https://www.bcn-aim.org/future-es/) projects (Ministry of Science, Spain) and the European Union's Horizon Europe programme ([RadioVal](https://radioval.eu/) and [ODELIA](https://odelia.ai/)).
