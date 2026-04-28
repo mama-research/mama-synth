@@ -31,11 +31,7 @@ mama-synth/
 │       │   └── mirror_utils.py         ← Midline detection + contralateral mask mirroring
 │       ├── models/                     ← Bundled classifier .pkl files & nnUNet weights
 │       ├── ground_truth/               ← GT data for Docker test runs
-│       ├── Dockerfile
-│       ├── do_build.sh
-│       ├── do_test_run.sh
-│       └── do_save.sh
-└── README.md                             ← this file
+└── README.md                           ← this file
 ```
 
 ---
