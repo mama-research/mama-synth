@@ -5,6 +5,7 @@ scikit-image>=0.20
 # pyradiomics PyPI release is broken for Python >= 3.10 (issue #903).
 # Install from the main branch of the GitHub repo instead:
 #   pip install git+https://github.com/AIM-Harvard/pyradiomics.git@master
+# Note that for pyradiomics to install, you might need to install a c++ compiler beforhand, e.g. see here https://visualstudio.microsoft.com/visual-cpp-build-tools/.
 # The line below uses PEP 508 direct-reference syntax so that
 # `pip install -r requirements.txt` works out-of-the-box (requires git).
 pyradiomics @ git+https://github.com/AIM-Harvard/pyradiomics.git@master
