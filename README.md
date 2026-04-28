@@ -96,7 +96,7 @@ Score synthetic predictions against ground truth.
 
 **Step 1: Add evaluation models**:
 
-The pretrained classification and segmentation models need to be added to `/src/evaluation/models` to run the complete evaluation. **[Download Weights](https://drive.google.com/file/d/1rliFnr-mNtISkJA0etm1dDBLdbHB3d4h/view) ⬇️**
+The pretrained classification and segmentation models need to be added to `/src/evaluation/models` to run the complete evaluation. **[Download Weights](https://drive.google.com/file/d/1rliFnr-mNtISkJA0etm1dDBLdbHB3d4h/view) ⬇️**. 
 
 **Step 2: Set environment variables and run**:
 ```bash
@@ -110,6 +110,8 @@ export MAMA_ENSEMBLE=True
 
 python src/evaluation/evaluate.py
 ```
+
+Note: The segmentation model is a single-fold [2D nnU-Net](https://github.com/mic-dkfz/nnunet) while the classification model is an ensemble of radiomics-based classifiers with training script available [here](https://github.com/RichardObi/MAMA-SYNTH-codebase/tree/main/mama-synth/mama-synth-eval#classifier-training). Both are trained on extracted tumor-containing DCE-MRI slices from the [mama-mia dataset](synapse.org/#!Synapse:syn60868042).
 
 ---
 
@@ -163,7 +165,7 @@ segmentation_dir/
 | | AUROC tumour-ROI | aggregate | Tumour ROI vs mirrored-ROI classifier AUROC |
 | **Segmentation** | Dice | per-case | Sørensen–Dice coefficient |
 | | HD95 | per-case | 95th-percentile Hausdorff distance |
-|
+
 
 Note that both classifiers use radiologist-verified **tumour segmentation mask** to extract radiomic features from the region of interest rather than full image features.
 
