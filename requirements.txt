@@ -14,5 +14,5 @@ torchmetrics>=1.0
 torch>=1.9
 pandas
 nnunetv2>=2.4
-numpy>=1.24,<2
+numpy
 xgboost
