@@ -18,7 +18,7 @@ import numpy as np
 from scipy import ndimage
 
 from .base import BaseEvaluator, Case, EvaluationResult
-
+from tqdm import tqdm
 
 class SegmentationEvaluator(BaseEvaluator):
     """Dice and 95th-percentile Hausdorff between predicted and GT masks."""
@@ -36,7 +36,7 @@ class SegmentationEvaluator(BaseEvaluator):
             return EvaluationResult()
 
         per_case: dict[str, dict[str, float]] = {}
-        for case in cases:
+        for case in tqdm(cases):
             if case.mask is None or not np.any(case.mask):
                 continue
             try:
