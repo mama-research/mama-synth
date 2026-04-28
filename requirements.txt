@@ -16,3 +16,4 @@ pandas
 nnunetv2>=2.4
 numpy
 xgboost
+tqdm
