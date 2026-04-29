@@ -169,5 +169,5 @@ Note that both classifiers use radiologist-verified **tumour segmentation mask**
 
 This challenge is supported by the [AIMED](https://www.bcn-aim.org/aimed/) and [FUTURE-ES](https://www.bcn-aim.org/future-es/) projects (Ministry of Science, Spain) and the European Union's Horizon Europe programme ([RadioVal](https://radioval.eu/) and [ODELIA](https://odelia.ai/)).
 
-![Acknowledgements](./assets/acknowledgements.jpg)
+![Acknowledgements](./assets/acknowledgements_miccai.jpg)
 
