@@ -7,7 +7,9 @@ Pipeline
 1. For each patient, load all 3D phase volumes and the tumour segmentation.
 2. Identify the peak enhancement phase as the phase with the highest mean
    tumour intensity across the full 3D volume.
-3. Select the 2D slice with the largest tumour area (along the smallest axis).
+3. Select the 2D slice with the largest tumour area.
+   The through-plane axis is determined via a layered heuristic (see
+   ``Preprocessor.determine_slice_axis`` for full details).
 4. Z-score normalise the pre-contrast and peak-enhancement 2D slices.
    Normalisation uses either:
      - Dataset-level stats from a JSON file produced by compute_dataset_stats.py
@@ -45,7 +47,7 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 import SimpleITK as sitk
 import logging
 from PIL import Image
@@ -61,6 +63,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class AmbiguousFOVError(ValueError):
+    """Raised when the through-plane axis cannot be determined from volume shape.
+
+    This happens when all three spatial dimensions are different (non-square FOV),
+    making it impossible to identify the in-plane vs through-plane directions
+    from shape alone.
+    """
+
+
 class Preprocessor:
     """Preprocess 3D DCE-MRI into 2D pre/peak slices with z-score normalisation."""
 
@@ -71,6 +82,7 @@ class Preprocessor:
         output_dir: str,
         csv_output_path: str = "report.csv",
         global_stats_path: str = None,
+        skip_ambiguous_shapes: bool = False,
     ):
         """
         Args:
@@ -82,6 +94,10 @@ class Preprocessor:
             global_stats_path: Path to a JSON file produced by compute_dataset_stats.py
                                containing {"mean": ..., "std": ...}. Required for
                                z-score normalisation.
+            skip_ambiguous_shapes: When True, patients whose segmentation volume has all
+                                   three dimensions different (non-square FOV) are logged
+                                   as warnings and silently skipped instead of raising
+                                   AmbiguousFOVError.  Defaults to False (raise).
         """
         self.image_dir = Path(image_dir)
         self.segmentation_dir = Path(segmentation_dir)
@@ -98,6 +114,7 @@ class Preprocessor:
             stats = json.load(f)
         self.global_norm_mean = float(stats['mean'])
         self.global_norm_std = float(stats['std'])
+        self.skip_ambiguous_shapes = skip_ambiguous_shapes
         logger.info(
             f"Global normalisation stats loaded from {global_stats_path}: "
             f"mean={self.global_norm_mean:.4f}, std={self.global_norm_std:.4f}"
@@ -132,6 +149,20 @@ class Preprocessor:
         img = sitk.ReadImage(image_path)
         return sitk.GetArrayFromImage(img).astype(np.float32)
 
+    def _load_spacing(self, image_path) -> Optional[Tuple[float, ...]]:
+        """Return voxel spacing (mm) for NIfTI files, or None for other formats.
+
+        Used by determine_slice_axis() to cross-validate the shape-based axis
+        against the physical voxel spacing (largest spacing = through-plane).
+        Returns None for MHA files because the spacing is not needed for the
+        primary heuristic and avoids an unnecessary second I/O round-trip.
+        """
+        image_path = str(image_path)
+        if image_path.endswith(('.nii.gz', '.nii')):
+            img = nib.load(image_path)
+            return tuple(float(z) for z in img.header.get_zooms()[:3])
+        return None
+
     def save_mha(self, image_2d: np.ndarray, output_path: Path, is_label: bool = False) -> None:
         """Save a 2D array as MHA, preserving float32 for images and int16 for labels."""
         image_2d = np.nan_to_num(np.asarray(image_2d), nan=0.0, posinf=0.0, neginf=0.0)
@@ -160,16 +191,116 @@ class Preprocessor:
     # Phase / slice selection
     # ------------------------------------------------------------------
 
-    def find_largest_label_slice(self, segmentation: np.ndarray) -> int:
-        """Return the index of the 2D slice (along smallest axis) with the most label voxels."""
-        axis = int(np.argmin(segmentation.shape))
+    def determine_slice_axis(
+        self,
+        shape: Tuple[int, ...],
+        spacing: Optional[Tuple[float, ...]] = None,
+    ) -> int:
+        """Determine the through-plane (slice) axis from volume shape.
+
+        Strategy (layered, in order of priority):
+
+        1. **Two axes share the same size, one is unique** → the unique axis is
+           the through-plane direction.  The result is cross-validated against
+           voxel spacing when available; a WARNING is logged if they disagree,
+           but the shape-based result is used as the primary criterion.
+
+        2. **All three axes equal (cubic volume)** → cannot distinguish axes from
+           shape alone.  A WARNING is logged and axis 2 is returned as the axial
+           convention fallback.
+
+        3. **All three axes differ (non-square FOV)** → raises AmbiguousFOVError.
+           Set ``skip_ambiguous_shapes=True`` on the Preprocessor to automatically
+           discard these patients during pipeline execution.
+
+        Args:
+            shape: 3-D volume shape, e.g. ``(H, W, D)``.
+            spacing: Voxel spacing in mm, e.g. ``(sx, sy, sz)``.  Used only for
+                     cross-validation in case 1; may be ``None``.
+
+        Returns:
+            Index (0, 1, or 2) of the through-plane axis.
+
+        Raises:
+            ValueError: If ``shape`` is not 3-D.
+            AmbiguousFOVError: If all three dimensions are different (case 3).
+        """
+        if len(shape) != 3:
+            raise ValueError(f"Expected a 3-D volume shape, got {shape}")
+
+        # Group axis indices by their size
+        size_to_axes: Dict[int, list] = {}
+        for ax, s in enumerate(shape):
+            size_to_axes.setdefault(s, []).append(ax)
+
+        n_unique_sizes = len(size_to_axes)
+
+        # --- Case 2: cubic ---
+        if n_unique_sizes == 1:
+            logger.warning(
+                "Cubic volume detected (shape %s). Cannot determine through-plane "
+                "axis from shape alone. Falling back to axis 2 (axial convention).",
+                shape,
+            )
+            return 2
+
+        # --- Case 3: all three dimensions differ ---
+        if n_unique_sizes == 3:
+            raise AmbiguousFOVError(
+                f"All three dimensions differ (shape {shape}). Cannot reliably "
+                "determine the through-plane axis from shape alone. Pass "
+                "skip_ambiguous_shapes=True to the Preprocessor (or "
+                "--skip_ambiguous_shapes on the CLI) to discard these cases "
+                "automatically."
+            )
+
+        # --- Case 1: exactly two distinct sizes → one unique axis ---
+        shape_axis: int = next(
+            axes[0]
+            for axes in size_to_axes.values()
+            if len(axes) == 1
+        )
+
+        # Cross-validate against voxel spacing when available
+        if spacing is not None and len(spacing) >= 3:
+            spacing_axis = int(np.argmax(spacing[:3]))
+            if spacing_axis != shape_axis:
+                logger.warning(
+                    "Shape-based through-plane axis (%d, size %d) disagrees with "
+                    "spacing-based axis (%d, spacing %.4f mm) for volume shape %s. "
+                    "Using shape-based axis as primary criterion.",
+                    shape_axis, shape[shape_axis],
+                    spacing_axis, spacing[spacing_axis],
+                    shape,
+                )
+
+        return shape_axis
+
+    def find_largest_label_slice(
+        self,
+        segmentation: np.ndarray,
+        spacing: Optional[Tuple[float, ...]] = None,
+    ) -> Tuple[int, int]:
+        """Return ``(slice_idx, axis)`` for the slice with the most label voxels.
+
+        The through-plane axis is resolved via :meth:`determine_slice_axis`.
+
+        Args:
+            segmentation: 3-D binary/label volume.
+            spacing: Voxel spacing in mm forwarded to :meth:`determine_slice_axis`
+                     for cross-validation.  May be ``None``.
+
+        Returns:
+            A tuple ``(slice_idx, axis)`` where *slice_idx* is the 0-based index
+            of the selected slice and *axis* is the through-plane axis (0, 1, or 2).
+        """
+        axis = self.determine_slice_axis(segmentation.shape, spacing)
         others = tuple(i for i in range(segmentation.ndim) if i != axis)
         slice_areas = np.sum(segmentation > 0, axis=others)
-        return int(np.argmax(slice_areas))
+        return int(np.argmax(slice_areas)), axis
 
-    def extract_slice(self, image: np.ndarray, slice_idx: int) -> np.ndarray:
-        """Extract 2D slice along the smallest spatial dimension."""
-        axis = int(np.argmin(image.shape))
+    def extract_slice(self, image: np.ndarray, slice_idx: int, axis: int) -> np.ndarray:
+        """Extract the 2D slice at *slice_idx* along *axis*."""
         return np.take(image, slice_idx, axis=axis)
 
     def find_peak_phase(
@@ -328,11 +459,23 @@ class Preprocessor:
                 )
 
                 # Step 2 – select slice with largest tumour area, then extract 2D slices
-                largest_slice = self.find_largest_label_slice(segmentation)
-                seg_2d = self.extract_slice(segmentation, largest_slice)
+                spacing = self._load_spacing(seg_file)
+                try:
+                    largest_slice, slice_axis = self.find_largest_label_slice(
+                        segmentation, spacing
+                    )
+                except AmbiguousFOVError as exc:
+                    if self.skip_ambiguous_shapes:
+                        logger.warning(
+                            "Skipping %s — ambiguous FOV: %s", patient_id, exc
+                        )
+                        continue
+                    raise
+
+                seg_2d = self.extract_slice(segmentation, largest_slice, slice_axis)
 
                 phase_images_2d: Dict[int, np.ndarray] = {
-                    phase_num: self.extract_slice(vol, largest_slice)
+                    phase_num: self.extract_slice(vol, largest_slice, slice_axis)
                     for phase_num, vol in phase_volumes_3d.items()
                 }
                 logger.info(f"  Pre phase : {pre_phase}")
@@ -420,6 +563,15 @@ def main():
             "containing {\"mean\": ..., \"std\": ...} for dataset-level z-score normalisation."
         )
     )
+    parser.add_argument(
+        "--skip_ambiguous_shapes", action="store_true", default=False,
+        help=(
+            "When set, patients whose segmentation volume has all three spatial dimensions "
+            "different (non-square FOV) are logged as warnings and skipped instead of "
+            "raising an error.  By default the pipeline raises AmbiguousFOVError for "
+            "these cases so they are not silently ignored."
+        )
+    )
     args = parser.parse_args()
 
     image_dir = Path(args.image_dir)
@@ -444,6 +596,7 @@ def main():
         output_dir=str(output_dir),
         csv_output_path=str(csv_path),
         global_stats_path=args.global_stats_path,
+        skip_ambiguous_shapes=args.skip_ambiguous_shapes,
     )
 
     logger.info("Starting preprocessing pipeline...")
