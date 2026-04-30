@@ -285,7 +285,7 @@ class TestProcessSkipAmbiguous:
     ) -> Path:
         import nibabel as nib
         folder = tmp_path / patient_id
-        folder.mkdir(exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
         data = np.ones(shape, dtype=np.float32)
         img = nib.Nifti1Image(data, affine=np.eye(4))
         path = folder / f"{patient_id}_{phase}.nii.gz"
