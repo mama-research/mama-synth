@@ -1,69 +1,78 @@
 #!/usr/bin/env bash
-# Run the evaluation container locally against test data.
-#
-# Expected data layout at the repository root (mirrors the GC zip extraction):
-#
-#   <repo_root>/
-#     ground_truth/          ← real post-contrast .mha slices  (same folder name as in the zip)
-#     masks/                 ← binary tumour masks .mha         (same folder name as in the zip)
-#     test/
-#       input/               ← predictions (flat .mha or GC predictions.json layout)
-#       output/              ← written by this script
-#     src/evaluation/models/ ← classifiers + nnUNet weights
-#
-# Docker mount strategy
-# ─────────────────────
-# GC extracts ground_truth.zip to /opt/ml/input/data/ground_truth/.
-# The zip top-level entries are ground_truth/ and masks/, so after
-# extraction the container sees:
-#   /opt/ml/input/data/ground_truth/ground_truth/*.mha
-#   /opt/ml/input/data/ground_truth/masks/*.mha
-#
-# We replicate this by mounting the REPOSITORY ROOT as
-# /opt/ml/input/data/ground_truth — the local ground_truth/ and masks/
-# folders then appear at exactly the paths evaluate.py expects.
-#
-# This container image is used unchanged for the debug, validation, and
-# test phases on Grand Challenge; only the uploaded ground truth data
-# differs between phases.
-#
-# Usage:
-#   ./do_test_run.sh
-set -e
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )
 
-# ---------------------------------------------------------------------------
-# GPU + memory detection
-# ---------------------------------------------------------------------------
-if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=memory.total \
-       --format=csv,noheader,nounits &>/dev/null 2>&1; then
-    GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total \
-        --format=csv,noheader,nounits | head -1)
-    # Convert MiB → GB and add 4 GB headroom for the full pipeline
-    MEMORY_GB=$(( (GPU_MEM_MIB / 1024) + 4 ))
-    MEMORY_LIMIT="${MEMORY_GB}g"
-    DOCKER_GPU_FLAG="--gpus all"
-    echo "[INFO] GPU detected: ${GPU_MEM_MIB} MiB VRAM → setting --memory=${MEMORY_LIMIT}"
+# Stop at first error
+set -e
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+DOCKER_IMAGE_TAG="mamasynth-gc-eval-v1.1.0"
+
+DOCKER_NOOP_VOLUME="${DOCKER_IMAGE_TAG}-volume"
+
+INPUT_DIR="${SCRIPT_DIR}/test/input"
+OUTPUT_DIR="${SCRIPT_DIR}/test/output"
+
+echo "=+= (Re)build the container"
+source "${SCRIPT_DIR}/do_build.sh"
+
+cleanup() {
+    echo "=+= Cleaning permissions ..."
+    # Ensure permissions are set correctly on the output
+    # This allows the host user (e.g. you) to access and handle these files
+    docker run --rm \
+      --platform=linux/amd64 \
+      --quiet \
+      --volume "$OUTPUT_DIR":/output \
+      --entrypoint /bin/sh \
+      $DOCKER_IMAGE_TAG \
+      -c "chmod -R -f o+rwX /output/* || true"
+
+    # Ensure volume is removed
+    docker volume rm "$DOCKER_NOOP_VOLUME" > /dev/null
+}
+
+# This allows for the Docker user to read
+chmod -R -f o+rX "$INPUT_DIR" "${SCRIPT_DIR}/ground_truth"
+
+if [ -d "$OUTPUT_DIR" ]; then
+  # This allows for the Docker user to write
+  chmod -f o+rwX "$OUTPUT_DIR"
+
+  echo "=+= Cleaning up any earlier output"
+  # Use the container itself to circumvent ownership problems
+  docker run --rm \
+      --platform=linux/amd64 \
+      --quiet \
+      --volume "$OUTPUT_DIR":/output \
+      --entrypoint /bin/sh \
+      $DOCKER_IMAGE_TAG \
+      -c "rm -rf /output/* || true"
 else
-    # No GPU: 16 GB covers nnUNet + radiomics + LPIPS on CPU
-    MEMORY_LIMIT="16g"
-    DOCKER_GPU_FLAG=""
-    echo "[INFO] No GPU detected → setting --memory=${MEMORY_LIMIT} (CPU mode)"
+  mkdir -m o+rwX "$OUTPUT_DIR"
 fi
 
-# Clean previous output
-rm -rf "$SCRIPT_DIR/test/output"
-mkdir -p "$SCRIPT_DIR/test/output"
+docker volume create "$DOCKER_NOOP_VOLUME" > /dev/null
 
-docker run --rm \
-    --memory="${MEMORY_LIMIT}" \
-    ${DOCKER_GPU_FLAG} \
-    -v "$SCRIPT_DIR/test/input:/input:ro" \
-    -v "$SCRIPT_DIR/test/output:/output" \
-    -v "$SCRIPT_DIR:/opt/ml/input/data/ground_truth:ro" \
-    -v "$SCRIPT_DIR/src/evaluation/models:/opt/app/models:ro" \
-    mama-synth-gc-eval
+trap cleanup EXIT
 
-echo ""
-echo "=== metrics.json ==="
-cat "$SCRIPT_DIR/test/output/metrics.json"
+echo "=+= Doing a forward pass"
+## Note the extra arguments that are passed here:
+# '--network none'
+#    entails there is no internet connection
+# '--gpus all'
+#    enables access to any GPUs present
+# '--volume <NAME>:/tmp'
+#   is added because on Grand Challenge this directory cannot be used to store permanent files
+# '--volume ../ground_truth:/opt/ml/input/data/ground_truth:ro'
+#   is added to provide access to the (optional) tarball-upload locally
+docker run --rm --gpus all \
+    --platform=linux/amd64 \
+    --network none \
+    --volume "$INPUT_DIR":/input:ro \
+    --volume "$OUTPUT_DIR":/output \
+    --volume "$DOCKER_NOOP_VOLUME":/tmp \
+    --volume "${SCRIPT_DIR}/ground_truth":/opt/ml/input/data/ground_truth:ro \
+    $DOCKER_IMAGE_TAG
+
+echo "=+= Wrote results to ${OUTPUT_DIR}"
+
+echo "=+= Save this image for uploading via ./do_save.sh"
