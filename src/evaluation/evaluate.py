@@ -9,29 +9,40 @@ slices) and evaluates them against ground truth using:
   * **Classification**: AUROC contrast, AUROC tumour-ROI
   * **Segmentation**: Dice, HD95
 
+This single container image is used for all GC phases (debug, validation,
+test).  The evaluation logic is identical across phases; only the ground
+truth data uploaded to each phase differs.
+
 Grand Challenge directory layout
---------------------------------
-::
+---------------------------------
+GC extracts the uploaded ``ground_truth.zip`` to
+``/opt/ml/input/data/ground_truth/``.  The zip must contain two top-level
+folders so that after extraction the structure is::
+
+    /opt/ml/input/data/ground_truth/
+        ground_truth/    ← real post-contrast 2-D .mha slices
+        masks/           ← binary tumour masks .mha
 
     /input/
         predictions.json
         {job_pk}/output/images/{slug}/*.mha
 
-    /opt/ml/input/data/ground_truth/
-        images/          ← real post-contrast 2-D .mha slices
-        masks/           ← binary tumour masks .mha
-        precontrast/     ← real pre-contrast 2-D .mha slices
-
     /opt/app/models/
-        contrast_classifier.pkl
-        tumor_roi_classifier.pkl
-        segmentation/    ← (optional) bundled segmentation model
+        classification/
+            contrast_classifier.pkl
+            tumor_roi_classifier.pkl
+        segmentation/    ← nnUNet model folder (fold_0/, plans.json, …)
 
     /output/
         metrics.json     ← evaluation results
 
 Local (development) mode
 ------------------------
+The ``do_test_run.sh`` script mounts the repository root as
+``/opt/ml/input/data/ground_truth/`` so that the local ``ground_truth/``
+and ``masks/`` folders at the repo root are accessible at the same
+container paths that GC uses.  This mirrors the GC extraction exactly.
+
 Set environment variables to override default GC paths::
 
     MAMA_INPUT_DIR          (default: /input)
@@ -39,8 +50,7 @@ Set environment variables to override default GC paths::
     MAMA_GT_DIR             (default: /opt/ml/input/data/ground_truth)
     MAMA_MODELS_DIR         (default: /opt/app/models)
     MAMA_PREDICTIONS_DIR    (flat dir of .mha predictions, local mode)
-    MAMA_MASKS_DIR          (flat dir of .mha masks, local mode)
-    MAMA_PRECONTRAST_DIR    (flat dir of .mha pre-contrast, local mode)
+    MAMA_MASKS_DIR          (flat dir of .mha masks, local mode override)
 """
 
 from __future__ import annotations
@@ -153,7 +163,9 @@ def load_cases_gc(
         case_id = Path(case_name).stem
 
         # --- Ground truth, mask, pre-contrast --------------------------
-        gt_path = _find_file(gt_dir / "images", case_id)
+        # GC extracts ground_truth.zip so that the post-contrast images live
+        # under gt_dir/ground_truth/ and masks under gt_dir/masks/.
+        gt_path = _find_file(gt_dir / "ground_truth", case_id)
         if gt_path is None:
             continue
         ground_truth = load_image(gt_path)
@@ -447,23 +459,21 @@ def main() -> int:
         pred_dir = Path(
             os.environ.get("MAMA_PREDICTIONS_DIR", str(input_dir))
         )
+        # GT images live under gt_dir/ground_truth/ (mirrors the GC zip structure).
+        # Fall back to gt_dir itself only when the subfolder is absent.
         gt_images_dir = (
-            gt_dir / "images" if (gt_dir / "images").exists() else gt_dir
+            gt_dir / "ground_truth" if (gt_dir / "ground_truth").exists() else gt_dir
         )
         masks_env = os.environ.get("MAMA_MASKS_DIR")
-        precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
         masks_sub = gt_dir / "masks"
-        precon_sub = gt_dir / "precontrast"
         masks_dir = (
             Path(masks_env) if masks_env
             else masks_sub if masks_sub.exists()
             else None
         )
-        precon_dir = (
-            Path(precon_env) if precon_env
-            else precon_sub if precon_sub.exists()
-            else None
-        )
+        # No precontrast in the ground_truth.zip; kept for local-override use only.
+        precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
+        precon_dir = Path(precon_env) if precon_env else None
         cases = load_cases_local(
             pred_dir, gt_images_dir, masks_dir, precon_dir
         )

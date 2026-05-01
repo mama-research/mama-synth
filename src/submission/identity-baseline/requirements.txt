@@ -1,0 +1,6 @@
+# Identity Baseline — Python dependencies
+#
+# Kept minimal on purpose: this baseline does nothing beyond reading and
+# writing a .mha file, so only SimpleITK is required.  Add your own
+# dependencies below when developing a real synthesis model.
+SimpleITK>=2.3.0
