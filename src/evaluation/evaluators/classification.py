@@ -332,7 +332,7 @@ class ClassificationEvaluator(BaseEvaluator):
         ensemble: bool = False,
     ) -> None:
         self.ensemble = ensemble
-        self.models_dir = models_dir / "classification" if models_dir is not None else None
+        self.models_dir = models_dir  # already the classification sub-dir when passed from evaluate.py
 
         # -- Contrast classifier(s) -----------------------------------
         self.contrast_clf: Optional[
@@ -467,8 +467,7 @@ class ClassificationEvaluator(BaseEvaluator):
         """AUROC: tumour ROI (label 1) vs mirrored contralateral (label 0).
 
         Uses anatomical midline detection to create a physiologically
-        meaningful contralateral region.  Includes bilateral breast check
-        (D2) and orientation-invariant axis fallback (D4).
+        meaningful contralateral region.
 
         Returns ``None`` if fewer than 4 feature vectors are available
         (minimum required for a meaningful binary AUROC: at least one
@@ -477,35 +476,17 @@ class ClassificationEvaluator(BaseEvaluator):
         feats: list[np.ndarray] = []
         labels: list[int] = []
 
-        n_total = len(cases)
-        n_no_mask = 0
-        n_mirror_failed = 0
-        n_identical = 0
-        n_feature_error = 0
-        n_ok = 0
-
         for case in cases:
             if case.mask is None or not np.any(case.mask):
-                n_no_mask += 1
                 continue
 
-            # Anatomical midline mirroring with bilateral check (D2) and
-            # orientation-invariant fallback (D4).  Detailed reason is
-            # logged inside create_mirrored_mask at WARNING level.
+            # Anatomical midline mirroring
             mirrored = create_mirrored_mask(
                 case.prediction, case.mask, case_id=case.case_id
             )
             if mirrored is None:
-                n_mirror_failed += 1
                 continue
             if np.array_equal(case.mask, mirrored):
-                print(
-                    f"WARNING: [{case.case_id}] tumour-ROI mirror is identical "
-                    "to the original mask — midline may be mis-detected. "
-                    "Case dropped from AUROC.",
-                    file=sys.stderr,
-                )
-                n_identical += 1
                 continue
 
             try:
@@ -521,36 +502,14 @@ class ClassificationEvaluator(BaseEvaluator):
                     continue
                 feats.extend([tf, mf])
                 labels.extend([1, 0])
-                n_ok += 1
             except Exception as exc:
-                n_feature_error += 1
                 print(
-                    f"WARNING: [{case.case_id}] tumour-ROI feature extraction "
-                    f"failed: {exc}",
+                    f"WARNING: tumour-ROI feature extraction failed "
+                    f"for {case.case_id}: {exc}",
                     file=sys.stderr,
                 )
 
-        # ---- Summary report -----------------------------------------
-        n_dropped = n_no_mask + n_mirror_failed + n_identical + n_feature_error
-        if n_dropped > 0:
-            print(
-                f"INFO: tumour-ROI AUROC — "
-                f"{n_ok}/{n_total} cases used, "
-                f"{n_dropped} dropped "
-                f"(no_mask={n_no_mask}, "
-                f"mirror_failed={n_mirror_failed}, "
-                f"mirror_identical={n_identical}, "
-                f"feature_error={n_feature_error}).",
-                file=sys.stderr,
-            )
-
         if len(feats) < 4:
-            print(
-                f"WARNING: tumour-ROI AUROC skipped — only {len(feats)//2} usable "
-                f"case(s) after filtering (need ≥2). "
-                f"Total cases: {n_total}, dropped: {n_dropped}.",
-                file=sys.stderr,
-            )
             return None
 
         X = np.nan_to_num(

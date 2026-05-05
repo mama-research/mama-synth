@@ -67,7 +67,7 @@ class ROIMetricsEvaluator(BaseEvaluator):
             # across all cases in z-score normalised space.
             data_range = 10.0
 
-            ssim_full, ssim_map = structural_similarity(
+            _, ssim_map = structural_similarity(
                 case.prediction,
                 case.ground_truth,
                 data_range=data_range,
@@ -231,7 +231,6 @@ def extract_radiomic_features(
     Raises ``ImportError`` if ``pyradiomics`` is not installed.
     """
     import radiomics  # type: ignore[import-untyped]
-    from radiomics import featureextractor  # type: ignore[import-untyped]
 
     if feature_classes is None:
         feature_classes = CLF_FEATURE_CLASSES

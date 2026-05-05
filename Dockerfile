@@ -22,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --chown=user:user requirements.txt /opt/app/
 
+# Install CPU-only PyTorch first (keeps image ~1.5 GB smaller than the default
+# CUDA build that plain `pip install torch` would pull from PyPI)
+RUN python -m pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
 RUN python -m pip install --no-cache-dir \
     --requirement /opt/app/requirements.txt
 
