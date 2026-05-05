@@ -9,29 +9,40 @@ slices) and evaluates them against ground truth using:
   * **Classification**: AUROC contrast, AUROC tumour-ROI
   * **Segmentation**: Dice, HD95
 
+This single container image is used for all GC phases (debug, validation,
+test).  The evaluation logic is identical across phases; only the ground
+truth data uploaded to each phase differs.
+
 Grand Challenge directory layout
---------------------------------
-::
+---------------------------------
+GC extracts the uploaded ``ground_truth.zip`` to
+``/opt/ml/input/data/ground_truth/``.  The zip must contain two top-level
+folders so that after extraction the structure is::
+
+    /opt/ml/input/data/ground_truth/
+        ground_truth/    ← real post-contrast 2-D .mha slices
+        masks/           ← binary tumour masks .mha
 
     /input/
         predictions.json
         {job_pk}/output/images/{slug}/*.mha
 
-    /opt/ml/input/data/ground_truth/
-        images/          ← real post-contrast 2-D .mha slices
-        masks/           ← binary tumour masks .mha
-        precontrast/     ← real pre-contrast 2-D .mha slices
-
     /opt/app/models/
-        contrast_classifier.pkl
-        tumor_roi_classifier.pkl
-        segmentation/    ← (optional) bundled segmentation model
+        classification/
+            contrast_classifier.pkl
+            tumor_roi_classifier.pkl
+        segmentation/    ← nnUNet model folder (fold_0/, plans.json, …)
 
     /output/
         metrics.json     ← evaluation results
 
 Local (development) mode
 ------------------------
+The ``do_test_run.sh`` script mounts the repository root as
+``/opt/ml/input/data/ground_truth/`` so that the local ``ground_truth/``
+and ``masks/`` folders at the repo root are accessible at the same
+container paths that GC uses.  This mirrors the GC extraction exactly.
+
 Set environment variables to override default GC paths::
 
     MAMA_INPUT_DIR          (default: /input)
@@ -39,13 +50,13 @@ Set environment variables to override default GC paths::
     MAMA_GT_DIR             (default: /opt/ml/input/data/ground_truth)
     MAMA_MODELS_DIR         (default: /opt/app/models)
     MAMA_PREDICTIONS_DIR    (flat dir of .mha predictions, local mode)
-    MAMA_MASKS_DIR          (flat dir of .mha masks, local mode)
-    MAMA_PRECONTRAST_DIR    (flat dir of .mha pre-contrast, local mode)
+    MAMA_MASKS_DIR          (flat dir of .mha masks, local mode override)
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from glob import glob
@@ -55,6 +66,8 @@ from typing import Optional
 import numpy as np
 import SimpleITK as sitk
 
+logger = logging.getLogger(__name__)
+
 from evaluators import (
     Case,
     ClassificationEvaluator,
@@ -62,6 +75,73 @@ from evaluators import (
     ROIMetricsEvaluator,
     SegmentationEvaluator,
 )
+
+# ======================================================================
+# Training statistics for prediction z-score normalisation
+# ======================================================================
+
+
+def _load_training_stats() -> tuple[float, float]:
+    """Load pre-contrast training μ and σ from ``training_pre_stats.json``.
+
+    Search order:
+    1. Same directory as this script (inside the Docker container).
+    2. ``../../preprocessing/training_pre_stats.json`` relative to this
+       script (development checkout layout).
+    3. Hard-coded fallback — the published values so the container still
+       works if the file is missing for any reason.
+    """
+    _FALLBACK_MU = 107.41193853581365
+    _FALLBACK_SIGMA = 219.96180535228203
+
+    candidates = [
+        Path(__file__).parent / "training_pre_stats.json",
+        Path(__file__).parent.parent / "preprocessing" / "training_pre_stats.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                with open(p) as fh:
+                    stats = json.load(fh)
+                mu = float(stats["mean"])
+                sigma = float(stats["std"])
+                logger.debug("Loaded training stats from %s (mu=%.4f, sigma=%.4f)", p, mu, sigma)
+                return mu, sigma
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not load training stats from %s: %s", p, exc)
+
+    logger.warning(
+        "training_pre_stats.json not found — using hard-coded fallback values "
+        "(mu=%.4f, sigma=%.4f).",
+        _FALLBACK_MU,
+        _FALLBACK_SIGMA,
+    )
+    return _FALLBACK_MU, _FALLBACK_SIGMA
+
+
+TRAINING_MU, TRAINING_SIGMA = _load_training_stats()
+
+
+def normalize_prediction(arr: np.ndarray) -> np.ndarray:
+    """Apply z-score normalisation to a raw-intensity prediction.
+
+    Uses the pre-contrast training statistics published with the challenge
+    (``training_pre_stats.json``).  Ground truth images are already stored
+    in z-score space, so this brings predictions onto the same scale before
+    any pixel-level metric is computed.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Raw prediction array in any intensity range.
+
+    Returns
+    -------
+    np.ndarray
+        Z-score normalised array: ``(arr - TRAINING_MU) / TRAINING_SIGMA``.
+    """
+    return (arr - TRAINING_MU) / TRAINING_SIGMA
+
 
 # ======================================================================
 # Interface slugs — customise for your GC phase configuration
@@ -129,8 +209,19 @@ def _find_file(directory: Path, stem: str) -> Optional[Path]:
 def load_cases_gc(
     input_dir: Path,
     gt_dir: Path,
+    normalize_predictions: bool = False,
 ) -> list[Case]:
-    """Load cases using the GC ``predictions.json`` interface."""
+    """Load cases using the GC ``predictions.json`` interface.
+
+    Parameters
+    ----------
+    normalize_predictions : bool
+        When ``True``, apply z-score normalisation to each prediction
+        using the published pre-contrast training statistics
+        (``TRAINING_MU``, ``TRAINING_SIGMA``).  Defaults to ``False``
+        because GC submissions are expected to already be in z-score
+        space.  Enable via ``MAMA_NORMALIZE_PREDICTIONS=1``.
+    """
     predictions_file = input_dir / "predictions.json"
     with open(predictions_file) as fh:
         predictions = json.load(fh)
@@ -152,8 +243,13 @@ def load_cases_gc(
             continue
         case_id = Path(case_name).stem
 
+        if normalize_predictions:
+            prediction = normalize_prediction(prediction)
+
         # --- Ground truth, mask, pre-contrast --------------------------
-        gt_path = _find_file(gt_dir / "images", case_id)
+        # GC extracts ground_truth.zip so that the post-contrast images live
+        # under gt_dir/ground_truth/ and masks under gt_dir/masks/.
+        gt_path = _find_file(gt_dir / "ground_truth", case_id)
         if gt_path is None:
             continue
         ground_truth = load_image(gt_path)
@@ -189,8 +285,19 @@ def load_cases_local(
     gt_dir: Path,
     masks_dir: Optional[Path] = None,
     precon_dir: Optional[Path] = None,
+    normalize_predictions: bool = False,
 ) -> list[Case]:
-    """Load cases from flat directories (for local development)."""
+    """Load cases from flat directories (for local development).
+
+    Parameters
+    ----------
+    normalize_predictions : bool
+        When ``True``, apply z-score normalisation to each prediction
+        using the published pre-contrast training statistics
+        (``TRAINING_MU``, ``TRAINING_SIGMA``).  Defaults to ``False``
+        because predictions are expected to already be in z-score
+        space.  Enable via ``MAMA_NORMALIZE_PREDICTIONS=1``.
+    """
     cases: list[Case] = []
     for pred_file in sorted(pred_dir.glob("*.mha")):
         case_id = pred_file.stem
@@ -211,10 +318,14 @@ def load_cases_local(
             if precon_path:
                 precontrast = load_image(precon_path)
 
+        prediction = load_image(pred_file)
+        if normalize_predictions:
+            prediction = normalize_prediction(prediction)
+
         cases.append(
             Case(
                 case_id=case_id,
-                prediction=load_image(pred_file),
+                prediction=prediction,
                 ground_truth=load_image(gt_path),
                 mask=mask,
                 precontrast=precontrast,
@@ -352,10 +463,21 @@ def load_segmentation_model(
 def run_evaluation(
     cases: list[Case],
     models_dir: Optional[Path] = None,
+    normalize_predictions: bool = False,
 ) -> dict:
     """Run all evaluators on *cases*, return the metrics dict.
 
     This is the main public API for programmatic use and testing.
+
+    Parameters
+    ----------
+    normalize_predictions : bool
+        Passed through to the case loaders.  When ``True``, predictions
+        are z-score normalised before metric computation.  Defaults to
+        ``False`` because GC submissions are expected to already be in
+        z-score space.  This parameter is informational here (normalisation
+        already happened during case loading); it is accepted so callers
+        can document the flag at the call site.
     """
     # Check for ensemble mode via environment variable
     ensemble = os.environ.get("MAMA_ENSEMBLE", "").lower() in (
@@ -378,7 +500,7 @@ def run_evaluation(
                     if models_dir
                     else None
                 ),
-                models_dir=models_dir / "classification",
+                models_dir=models_dir / "classification" if models_dir else None,
                 ensemble=ensemble
             ),
         ),
@@ -439,33 +561,46 @@ def main() -> int:
     metrics_path = output_dir / "metrics.json"
 
     # ---- Discover and load cases -------------------------------------
+    # No normalisation by default; opt in with MAMA_NORMALIZE_PREDICTIONS=1
+    _norm_env = os.environ.get("MAMA_NORMALIZE_PREDICTIONS", "0").strip().lower()
+    normalize_predictions = _norm_env in ("1", "true", "yes")
+    if normalize_predictions:
+        print(
+            f"  Prediction normalisation: ON "
+            f"(mu={TRAINING_MU:.4f}, sigma={TRAINING_SIGMA:.4f})"
+        )
+    else:
+        print(
+            "  Prediction normalisation: OFF (predictions assumed already z-scored) "
+            "— set MAMA_NORMALIZE_PREDICTIONS=1 to enable"
+        )
+
     if (input_dir / "predictions.json").exists():
         print("Loading cases from GC predictions.json …")
-        cases = load_cases_gc(input_dir, gt_dir)
+        cases = load_cases_gc(input_dir, gt_dir, normalize_predictions=normalize_predictions)
     else:
         print("Loading cases from flat directories (local mode) …")
         pred_dir = Path(
             os.environ.get("MAMA_PREDICTIONS_DIR", str(input_dir))
         )
+        # GT images live under gt_dir/ground_truth/ (mirrors the GC zip structure).
+        # Fall back to gt_dir itself only when the subfolder is absent.
         gt_images_dir = (
-            gt_dir / "images" if (gt_dir / "images").exists() else gt_dir
+            gt_dir / "ground_truth" if (gt_dir / "ground_truth").exists() else gt_dir
         )
         masks_env = os.environ.get("MAMA_MASKS_DIR")
-        precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
         masks_sub = gt_dir / "masks"
-        precon_sub = gt_dir / "precontrast"
         masks_dir = (
             Path(masks_env) if masks_env
             else masks_sub if masks_sub.exists()
             else None
         )
-        precon_dir = (
-            Path(precon_env) if precon_env
-            else precon_sub if precon_sub.exists()
-            else None
-        )
+        # No precontrast in the ground_truth.zip; kept for local-override use only.
+        precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
+        precon_dir = Path(precon_env) if precon_env else None
         cases = load_cases_local(
-            pred_dir, gt_images_dir, masks_dir, precon_dir
+            pred_dir, gt_images_dir, masks_dir, precon_dir,
+            normalize_predictions=normalize_predictions,
         )
 
     if not cases:
