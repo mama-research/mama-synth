@@ -492,6 +492,11 @@ class Preprocessor:
                 # Step 4 – save files named patient_id.extension
                 fname = patient_id
 
+                # Rotate 90° CCW so the thorax appears at the bottom for axial patients
+                pre_norm  = np.rot90(pre_norm,  k=1)
+                peak_norm = np.rot90(peak_norm, k=1)
+                mask_2d   = np.rot90(mask_2d,   k=1)
+
                 self.save_mha(pre_norm,  self.mha_input_dir  / f"{fname}.mha")
                 self.save_mha(peak_norm, self.mha_gt_dir      / f"{fname}.mha")
                 self.save_mha(mask_2d,   self.mha_mask_dir    / f"{fname}.mha", is_label=True)
