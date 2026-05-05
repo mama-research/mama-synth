@@ -524,6 +524,11 @@ class Preprocessor:
                     'phase_intensities': phase_intensity_str,
                 })
 
+            except AmbiguousFOVError:
+                # Already handled in find_largest_label_slice block above:
+                # if skip_ambiguous_shapes=True it was caught and continued;
+                # if False the raise above escalates here and must propagate.
+                raise
             except Exception as e:
                 logger.error(f"Error processing {patient_id}: {e}")
                 continue
