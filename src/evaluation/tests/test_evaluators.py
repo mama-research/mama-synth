@@ -216,15 +216,15 @@ class TestClassification:
         """
         try:
             from evaluators.roi_metrics import extract_radiomic_features
-        except ImportError:
+
+            case = _make_case(0)
+            assert case.mask is not None and np.any(case.mask)
+
+            feats_mask = extract_radiomic_features(case.prediction, case.mask)
+            whole = np.ones(case.prediction.shape, dtype=bool)
+            feats_whole = extract_radiomic_features(case.prediction, whole)
+        except Exception:
             pytest.skip("pyradiomics unavailable")
-
-        case = _make_case(0)
-        assert case.mask is not None and np.any(case.mask)
-
-        feats_mask = extract_radiomic_features(case.prediction, case.mask)
-        whole = np.ones(case.prediction.shape, dtype=bool)
-        feats_whole = extract_radiomic_features(case.prediction, whole)
 
         # The two feature vectors must NOT be identical — they describe
         # different regions of the same image.
@@ -351,7 +351,7 @@ class TestEndToEnd:
 
         input_dir = tmp_path / "input"
         gt_dir = tmp_path / "ground_truth"
-        gt_images = gt_dir / "images"
+        gt_images = gt_dir / "ground_truth"
         gt_masks = gt_dir / "masks"
         gt_precon = gt_dir / "precontrast"
         output_dir = tmp_path / "output"

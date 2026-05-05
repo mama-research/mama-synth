@@ -12,7 +12,7 @@ pyradiomics @ git+https://github.com/AIM-Harvard/pyradiomics.git@master
 #lpips>=0.1  # not used — torchmetrics handles LPIPS
 frd-score>=1.0
 torchmetrics>=1.0
-torch>=1.9
+torch<2.10
 pandas
 nnunetv2>=2.4
 numpy
