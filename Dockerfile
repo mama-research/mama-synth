@@ -32,6 +32,8 @@ RUN python -m pip install --no-cache-dir \
 # Copy evaluation code — build context is the repository root
 COPY --chown=user:user src/evaluation/evaluators/ /opt/app/evaluators/
 COPY --chown=user:user src/evaluation/evaluate.py /opt/app/
+# Published pre-contrast training statistics used to z-score normalise predictions
+COPY --chown=user:user src/preprocessing/training_pre_stats.json /opt/app/
 
 # Copy bundled models (classifiers + nnUNet segmentation weights).
 # models/ already contains a .gitkeep so this COPY succeeds even when
