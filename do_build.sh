@@ -1,9 +1,12 @@
-#!/usr/bin/env bash
-# Build the evaluation container image.
-#
-# The build context is the repository root (this directory).
-# Dockerfile COPY paths reference src/evaluation/ explicitly, so all
-# evaluation code, models, and requirements.txt are found correctly.
+
+# Stop at first error
 set -e
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )
-docker build -t mama-synth-gc-eval "$SCRIPT_DIR"
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+DOCKER_IMAGE_TAG="mamasynth-gc-eval-v1.1.0"
+
+docker build \
+  --platform=linux/amd64 \
+  --tag "$DOCKER_IMAGE_TAG"  \
+  ${DOCKER_QUIET_BUILD:+--quiet} \
+  "$SCRIPT_DIR" 2>&1

@@ -17,14 +17,10 @@ WORKDIR /opt/app
 #   libgomp1        — required by nnUNet / scikit-learn for OpenMP parallelism
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ git \
-    libgl1 libglib2.0-0 libgomp1 && \
+    libgl1 libglib2.0-0 libgomp1 wget && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --chown=user:user requirements.txt /opt/app/
-
-# Install CPU-only PyTorch first (keeps image ~1.5 GB smaller)
-RUN python -m pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu
 
 RUN python -m pip install --no-cache-dir \
     --requirement /opt/app/requirements.txt
@@ -39,6 +35,10 @@ COPY --chown=user:user src/preprocessing/training_pre_stats.json /opt/app/
 # models/ already contains a .gitkeep so this COPY succeeds even when
 # only the directory skeleton is present.
 COPY --chown=user:user src/evaluation/models/ /opt/app/models/
+
+RUN mkdir -p /home/user/.cache/torch/hub/checkpoints && chown user:user /home/user/.cache/torch/hub/checkpoints
+RUN mkdir -p /home/user/.cache/matplotlib && chown user:user /home/user/.cache/matplotlib
+RUN wget https://download.pytorch.org/models/alexnet-owt-7be5be79.pth -O /home/user/.cache/torch/hub/checkpoints/alexnet-owt-7be5be79.pth
 
 # Prepare output directory
 RUN mkdir -p /output && chown user:user /output
