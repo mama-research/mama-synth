@@ -7,7 +7,7 @@ be read back as a valid 2-D image.
 Prerequisites:
   - Docker installed and running
   - A test .mha file placed in:
-      test/input/images/pre-contrast-breast-mri/
+      test/input/images/pre-contrast-dce-mri-slice-breast/
 
 Run:
   pytest test_algorithm.py -v
@@ -25,8 +25,8 @@ from pathlib import Path
 import SimpleITK as sitk
 
 SCRIPT_DIR = Path(__file__).parent
-INPUT_DIR = SCRIPT_DIR / "test" / "input" / "images" / "pre-contrast-breast-mri"
-OUTPUT_DIR = SCRIPT_DIR / "test" / "output" / "images" / "synthetic-post-contrast-breast-mri"
+INPUT_DIR = SCRIPT_DIR / "test" / "input" / "images" / "pre-contrast-dce-mri-slice-breast"
+OUTPUT_DIR = SCRIPT_DIR / "test" / "output" / "images" / "synthetic-contrast-dce-mri-slice-breast"
 
 
 def test_output_file_created():

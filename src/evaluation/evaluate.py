@@ -107,10 +107,10 @@ logger = logging.getLogger(__name__)
 # Interface slugs — customise for your GC phase configuration
 # ======================================================================
 PREDICTION_SLUG = os.environ.get(
-    "MAMA_PREDICTION_SLUG", "synthetic-post-contrast-breast-mri"
+    "MAMA_PREDICTION_SLUG", "synthetic-contrast-dce-mri-slice-breast"
 )
 INPUT_SLUG = os.environ.get(
-    "MAMA_INPUT_SLUG", "pre-contrast-breast-mri"
+    "MAMA_INPUT_SLUG", "pre-contrast-dce-mri-slice-breast"
 )
 
 

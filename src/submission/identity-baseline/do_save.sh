@@ -13,7 +13,7 @@
 set -e
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )
 
-VERSION="v1.0.0"
+VERSION="v1.0.1"
 OUT_FILE="$SCRIPT_DIR/mama-synth-identity-baseline-${VERSION}.tar.gz"
 
 bash "$SCRIPT_DIR/do_build.sh"

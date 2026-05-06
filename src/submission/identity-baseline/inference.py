@@ -11,10 +11,10 @@ image directly to the output, producing no synthesis.  It serves as:
 Grand Challenge I/O contract
 -----------------------------
 Input  (one file per job):
-    /input/images/pre-contrast-breast-mri/<uuid>.mha
+    /input/images/pre-contrast-dce-mri-slice-breast/<uuid>.mha
 
 Output (one file per job):
-    /output/images/synthetic-post-contrast-breast-mri/output.mha
+    /output/images/synthetic-contrast-dce-mri-slice-breast/output.mha
 
 All images are 2-D z-score-normalised float32 .mha files produced by the
 MAMA-SYNTH preprocessing pipeline.  Spacing and image metadata from the
@@ -38,21 +38,56 @@ INPUT_PATH = Path(os.environ.get("MAMA_INPUT_DIR", "/input"))
 OUTPUT_PATH = Path(os.environ.get("MAMA_OUTPUT_DIR", "/output"))
 
 # Interface slugs — must match the challenge phase configuration on GC.
-INPUT_SLUG = os.environ.get("MAMA_INPUT_SLUG", "pre-contrast-breast-mri")
+INPUT_SLUG = os.environ.get("MAMA_INPUT_SLUG", "pre-contrast-dce-mri-slice-breast")
 OUTPUT_SLUG = os.environ.get(
-    "MAMA_PREDICTION_SLUG", "synthetic-post-contrast-breast-mri"
+    "MAMA_PREDICTION_SLUG", "synthetic-contrast-dce-mri-slice-breast"
 )
 
 
 def _find_input_image() -> Path:
-    """Return the single input .mha file for this job."""
+    """Return the single input image file for this job.
+
+    Searches for .mha, .nii.gz, and .nii files in the expected GC input
+    directory.  If nothing is found, emits a detailed diagnostic listing
+    what *is* present under /input so participants can spot slug mismatches.
+    """
     search_dir = INPUT_PATH / "images" / INPUT_SLUG
-    candidates = glob(str(search_dir / "*.mha"))
+    candidates: list[str] = []
+    for ext in ("*.mha", "*.nii.gz", "*.nii"):
+        candidates.extend(glob(str(search_dir / ext)))
+
     if not candidates:
-        raise FileNotFoundError(
-            f"No .mha file found in {search_dir}. "
-            "Check that the input interface slug matches the challenge phase."
-        )
+        # Build a diagnostic tree of what actually exists under /input
+        diag_lines: list[str] = [
+            f"No image file found in: {search_dir}",
+            f"INPUT_SLUG used: '{INPUT_SLUG}'",
+            "",
+            "Directory tree under /input/images (if it exists):",
+        ]
+        images_dir = INPUT_PATH / "images"
+        if images_dir.exists():
+            for entry in sorted(images_dir.rglob("*")):
+                diag_lines.append(f"  {entry}")
+        else:
+            diag_lines.append(f"  {images_dir} does not exist!")
+            diag_lines.append("")
+            diag_lines.append("Contents of /input:")
+            if INPUT_PATH.exists():
+                for entry in sorted(INPUT_PATH.iterdir()):
+                    diag_lines.append(f"  {entry}")
+            else:
+                diag_lines.append(f"  {INPUT_PATH} does not exist!")
+
+        diag_lines += [
+            "",
+            "How to fix:",
+            "  1. Check that the input interface slug in your GC algorithm",
+            f"     settings exactly matches '{INPUT_SLUG}'.",
+            "  2. Verify the phase's input interface type is 'Image'.",
+            "  3. Override the slug at runtime: MAMA_INPUT_SLUG=<correct-slug>",
+        ]
+        raise FileNotFoundError("\n".join(diag_lines))
+
     if len(candidates) > 1:
         print(
             f"WARNING: {len(candidates)} files found in {search_dir}; "
