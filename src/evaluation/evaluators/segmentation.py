@@ -12,6 +12,7 @@ optional ``voxel_spacing`` support — aligned with ``mama-synth-eval``.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 import numpy as np
@@ -19,6 +20,8 @@ from scipy import ndimage
 
 from .base import BaseEvaluator, Case, EvaluationResult
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 class SegmentationEvaluator(BaseEvaluator):
     """Dice and 95th-percentile Hausdorff between predicted and GT masks."""
@@ -33,27 +36,50 @@ class SegmentationEvaluator(BaseEvaluator):
 
     def evaluate(self, cases: list[Case]) -> EvaluationResult:
         if self.segment_fn is None:
+            logger.info(
+                "SegmentationEvaluator: no segmentation model provided — "
+                "Dice and HD95 will not be computed."
+            )
             return EvaluationResult()
 
         per_case: dict[str, dict[str, float]] = {}
-        for case in tqdm(cases):
+        n_skip_no_mask = 0
+        for case in tqdm(cases, desc="Segmentation", unit="case"):
             if case.mask is None or not np.any(case.mask):
+                n_skip_no_mask += 1
                 continue
             try:
                 pred_mask = self.segment_fn(case.prediction)
                 if pred_mask is None or not np.any(pred_mask):
+                    logger.warning(
+                        "%s — segmentation model returned an empty mask "
+                        "(all zeros). Dice will be 0 for this case. "
+                        "Check that your images are correctly normalised and "
+                        "that the nnUNet model checkpoint is intact.",
+                        case.case_id,
+                    )
                     continue
                 pred_mask = pred_mask.astype(bool)
                 gt_mask = case.mask.astype(bool)
 
                 dice = compute_dice(pred_mask, gt_mask)
                 hd95 = compute_hausdorff_95(pred_mask, gt_mask)
+                logger.debug("%s  dice=%.4f  hd95=%.2f", case.case_id, dice, hd95)
                 per_case[case.case_id] = {
                     "dice": dice,
                     "hausdorff_95": hd95,
                 }
-            except Exception:
-                continue
+            except Exception as exc:
+                logger.warning(
+                    "%s — segmentation inference failed: %s",
+                    case.case_id, exc,
+                )
+
+        if n_skip_no_mask > 0:
+            logger.info(
+                "Segmentation: %d/%d case(s) skipped (no GT mask available).",
+                n_skip_no_mask, len(cases),
+            )
 
         agg: dict[str, dict[str, float]] = {}
         dice_agg = self._aggregate_metric(per_case, "dice")

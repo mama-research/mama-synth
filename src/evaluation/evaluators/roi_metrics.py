@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
 import tempfile
 from pathlib import Path
@@ -22,6 +23,8 @@ import SimpleITK as sitk
 from skimage.metrics import structural_similarity
 
 from .base import BaseEvaluator, Case, EvaluationResult
+
+logger = logging.getLogger(__name__)
 
 # ======================================================================
 # Pyradiomics settings — aligned with mama-synth-eval / frd-score
@@ -56,9 +59,25 @@ class ROIMetricsEvaluator(BaseEvaluator):
 
     def evaluate(self, cases: list[Case]) -> EvaluationResult:
         per_case: dict[str, dict[str, float]] = {}
+        n_total = len(cases)
+        n_skip_no_mask = n_skip_empty = 0
 
         for case in cases:
-            if case.mask is None or not np.any(case.mask):
+            if case.mask is None:
+                logger.debug(
+                    "%s — skipping ROIMetrics: no tumour mask available.",
+                    case.case_id,
+                )
+                n_skip_no_mask += 1
+                continue
+            if not np.any(case.mask):
+                logger.warning(
+                    "%s — skipping ROIMetrics: tumour mask is entirely zero "
+                    "(no foreground voxels).  SSIM-tumour will not be computed "
+                    "for this case.",
+                    case.case_id,
+                )
+                n_skip_empty += 1
                 continue
 
             # ---- SSIM within mask (standard local-window) --------
@@ -81,6 +100,13 @@ class ROIMetricsEvaluator(BaseEvaluator):
         ssim_agg = self._aggregate_metric(per_case, "ssim_tumor")
         if ssim_agg:
             agg["ssim_tumor"] = ssim_agg
+
+        if n_skip_no_mask + n_skip_empty > 0:
+            logger.info(
+                "ROIMetrics: %d/%d case(s) contributed to SSIM-tumour "
+                "(%d had no mask, %d had empty mask).",
+                len(per_case), n_total, n_skip_no_mask, n_skip_empty,
+            )
 
         # ---- FRD via frd-score library ---------------------------
         frd_val = self._compute_frd(cases)
@@ -107,15 +133,19 @@ class ROIMetricsEvaluator(BaseEvaluator):
             if c.mask is not None and np.any(c.mask)
         ]
         if len(valid) < 2:
+            logger.warning(
+                "FRD requires at least 2 cases with non-empty tumour masks; "
+                "found %d. FRD will not be computed.",
+                len(valid),
+            )
             return None
 
         try:
             from frd_score import compute_frd as frd_compute
         except ImportError:
-            print(
-                "WARNING: FRD unavailable (frd-score not installed). "
-                "Install with: pip install frd-score",
-                file=sys.stderr,
+            logger.warning(
+                "FRD unavailable: 'frd-score' package is not installed. "
+                "Install with: pip install frd-score"
             )
             return None
 
@@ -169,9 +199,10 @@ class ROIMetricsEvaluator(BaseEvaluator):
             )
             return float(frd_val)
         except Exception as exc:
-            print(
-                f"WARNING: FRD computation failed: {exc}",
-                file=sys.stderr,
+            logger.warning(
+                "FRD computation failed: %s\n"
+                "This is an aggregate-only metric; per-case scores are unaffected.",
+                exc,
             )
             return None
         finally:

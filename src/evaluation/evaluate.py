@@ -56,8 +56,10 @@ Set environment variables to override default GC paths::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import time
 from glob import glob
 from pathlib import Path
 from typing import Optional
@@ -72,6 +74,34 @@ from evaluators import (
     ROIMetricsEvaluator,
     SegmentationEvaluator,
 )
+
+# ======================================================================
+# Logging — single stdout stream so participants see one clean log
+# ======================================================================
+
+_LOG_FMT = "%(asctime)s  %(levelname)-8s %(message)s"
+_LOG_DATE = "%H:%M:%S"
+
+
+def _configure_logging() -> None:
+    """Configure root logger: timestamped lines to stdout."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format=_LOG_FMT,
+        datefmt=_LOG_DATE,
+        stream=sys.stdout,
+        force=True,
+    )
+    # Silence chatty third-party libraries so only evaluation output is visible
+    for _lib in (
+        "nnunetv2", "batchgenerators", "acvl_utils",
+        "radiomics", "torch", "PIL",
+    ):
+        logging.getLogger(_lib).setLevel(logging.WARNING)
+
+
+_configure_logging()
+logger = logging.getLogger(__name__)
 
 # ======================================================================
 # Interface slugs — customise for your GC phase configuration
@@ -92,15 +122,41 @@ INPUT_SLUG = os.environ.get(
 def load_image(path: Path) -> np.ndarray:
     """Load a .mha image as ``float64`` (no additional normalisation).
 
-    Images are expected to arrive **z-score normalised** using pre-contrast
-    reference statistics.  No per-image min-max is applied — this avoids
-    the bias that independent normalisation would introduce in MSE, LPIPS,
-    and SSIM.
+    Images are expected to arrive **z-score normalised** using the challenge
+    pre-contrast reference statistics.  No per-image min-max is applied —
+    this avoids bias that independent normalisation would introduce in MSE,
+    LPIPS, and SSIM.
     """
     img = sitk.ReadImage(str(path))
     arr = sitk.GetArrayFromImage(img).astype(np.float64)
     if arr.ndim == 3 and arr.shape[0] == 1:
         arr = arr[0]
+
+    # ---- Participant-facing sanity checks --------------------------------
+    if arr.ndim != 2:
+        logger.warning(
+            "%s — unexpected array shape %s (expected a 2-D slice). "
+            "If your algorithm outputs a 3-D volume, extract and submit "
+            "only the single 2-D post-contrast slice before uploading. "
+            "The middle slice is being used as a fallback.",
+            path.name, arr.shape,
+        )
+        if arr.ndim == 3:
+            arr = arr[arr.shape[0] // 2]
+
+    abs_max = float(np.max(np.abs(arr)))
+    if abs_max > 500:
+        logger.warning(
+            "%s — very large intensity values detected (|max| = %.1f). "
+            "Predictions MUST be z-score normalised before submission "
+            "(expected typical range \u2248 \u22123 to +10, |max| < 100). "
+            "Submitting raw or HU-scaled images will directly inflate "
+            "MSE/LPIPS scores and distort your ranking. "
+            "Apply the same preprocessing pipeline described in the "
+            "challenge documentation.",
+            path.name, abs_max,
+        )
+
     return arr
 
 
@@ -110,7 +166,15 @@ def load_mask(path: Path) -> np.ndarray:
     arr = sitk.GetArrayFromImage(img).astype(np.float64)
     if arr.ndim == 3 and arr.shape[0] == 1:
         arr = arr[0]
-    return arr > 0
+    mask = arr > 0
+    if not np.any(mask):
+        logger.warning(
+            "Mask file %s is entirely zero — no foreground tumour voxels found. "
+            "Mask-dependent metrics (SSIM-tumour, AUROC-tumour-ROI, FRD) "
+            "will be skipped for this case.",
+            path.name,
+        )
+    return mask
 
 
 def write_metrics(metrics: dict, path: Path) -> None:
@@ -145,40 +209,92 @@ def load_cases_gc(
     with open(predictions_file) as fh:
         predictions = json.load(fh)
 
+    n_jobs = len(predictions)
+    logger.info("  Found %d job entr%s in predictions.json",
+                n_jobs, "y" if n_jobs == 1 else "ies")
+
     cases: list[Case] = []
-    for job in predictions:
+    n_skip_pred = n_skip_id = n_skip_gt = n_skip_shape = 0
+
+    for idx, job in enumerate(predictions, 1):
         pk = job["pk"]
 
         # --- Locate the prediction .mha --------------------------------
         pred_dir = input_dir / pk / "output" / f"images/{PREDICTION_SLUG}"
         pred_files = glob(str(pred_dir / "*.mha"))
         if not pred_files:
+            logger.warning(
+                "  [%d/%d] pk=%s — no prediction file found under:\n"
+                "    %s\n"
+                "  Your algorithm must write its output image to the socket "
+                "with slug '%s'.  Check that the output interface is "
+                "configured correctly in your algorithm container.",
+                idx, n_jobs, pk, pred_dir, PREDICTION_SLUG,
+            )
+            n_skip_pred += 1
             continue
+
         prediction = load_image(Path(pred_files[0]))
 
         # --- Case ID from the algorithm input image name ---------------
         case_name = _gc_input_image_name(job)
         if case_name is None:
+            logger.warning(
+                "  [%d/%d] pk=%s — cannot determine case ID: no input with "
+                "slug '%s' in predictions.json.  This job will be skipped.",
+                idx, n_jobs, pk, INPUT_SLUG,
+            )
+            n_skip_id += 1
             continue
         case_id = Path(case_name).stem
 
         # --- Ground truth, mask, pre-contrast --------------------------
-        # GC extracts ground_truth.zip so that the post-contrast images live
-        # under gt_dir/ground_truth/ and masks under gt_dir/masks/.
         gt_path = _find_file(gt_dir / "ground_truth", case_id)
         if gt_path is None:
+            logger.warning(
+                "  [%d/%d] %s — ground-truth file not found in:\n"
+                "    %s\n"
+                "  Verify that ground_truth.zip was uploaded correctly and "
+                "that the filename stem matches the case ID '%s' exactly.",
+                idx, n_jobs, case_id, gt_dir / "ground_truth", case_id,
+            )
+            n_skip_gt += 1
             continue
+
         ground_truth = load_image(gt_path)
+
+        if prediction.shape != ground_truth.shape:
+            logger.warning(
+                "  [%d/%d] %s — shape mismatch: prediction %s \u2260 GT %s. "
+                "Predictions must be 2-D slices with the same (H\u00d7W) as "
+                "the ground-truth image.  This case will be skipped.",
+                idx, n_jobs, case_id, prediction.shape, ground_truth.shape,
+            )
+            n_skip_shape += 1
+            continue
 
         mask: Optional[np.ndarray] = None
         mask_path = _find_file(gt_dir / "masks", case_id)
         if mask_path:
             mask = load_mask(mask_path)
+        else:
+            logger.warning(
+                "  [%d/%d] %s — no mask file found; "
+                "SSIM-tumour, AUROC-tumour-ROI and FRD will be skipped for this case.",
+                idx, n_jobs, case_id,
+            )
 
         precontrast: Optional[np.ndarray] = None
         precon_path = _find_file(gt_dir / "precontrast", case_id)
         if precon_path:
             precontrast = load_image(precon_path)
+
+        logger.info(
+            "  [%d/%d] %-20s  pred=%-12s  gt=%-12s  mask=%s",
+            idx, n_jobs, case_id,
+            str(prediction.shape), str(ground_truth.shape),
+            "yes" if mask is not None else "NO",
+        )
 
         cases.append(
             Case(
@@ -193,6 +309,16 @@ def load_cases_gc(
             )
         )
 
+    skipped = n_skip_pred + n_skip_id + n_skip_gt + n_skip_shape
+    if skipped:
+        logger.warning(
+            "  Skipped %d/%d job(s) — "
+            "%d missing prediction, %d missing case-ID, "
+            "%d missing GT, %d shape mismatch.",
+            skipped, n_jobs,
+            n_skip_pred, n_skip_id, n_skip_gt, n_skip_shape,
+        )
+
     return cases
 
 
@@ -203,11 +329,22 @@ def load_cases_local(
     precon_dir: Optional[Path] = None,
 ) -> list[Case]:
     """Load cases from flat directories (for local development)."""
+    pred_files = sorted(pred_dir.glob("*.mha"))
+    n_pred = len(pred_files)
+    logger.info("  Found %d prediction file(s) in %s", n_pred, pred_dir)
+
     cases: list[Case] = []
-    for pred_file in sorted(pred_dir.glob("*.mha")):
+    n_skip_gt = n_skip_shape = 0
+
+    for idx, pred_file in enumerate(pred_files, 1):
         case_id = pred_file.stem
         gt_path = _find_file(gt_dir, case_id)
         if gt_path is None:
+            logger.warning(
+                "  [%d/%d] %s — no matching GT file in %s, skipping.",
+                idx, n_pred, case_id, gt_dir,
+            )
+            n_skip_gt += 1
             continue
 
         mask: Optional[np.ndarray] = None
@@ -216,6 +353,13 @@ def load_cases_local(
             mask_file = _find_file(masks_dir, case_id)
             if mask_file:
                 mask = load_mask(mask_file)
+            else:
+                logger.warning(
+                    "  [%d/%d] %s — no mask file in %s; "
+                    "SSIM-tumour, AUROC-tumour-ROI and FRD will be skipped "
+                    "for this case.",
+                    idx, n_pred, case_id, masks_dir,
+                )
 
         precontrast: Optional[np.ndarray] = None
         if precon_dir:
@@ -224,12 +368,29 @@ def load_cases_local(
                 precontrast = load_image(precon_path)
 
         prediction = load_image(pred_file)
+        ground_truth = load_image(gt_path)
+
+        if prediction.shape != ground_truth.shape:
+            logger.warning(
+                "  [%d/%d] %s — shape mismatch: prediction %s \u2260 GT %s. "
+                "Predictions must have the same (H\u00d7W) dimensions as the "
+                "ground-truth.  This case will be skipped.",
+                idx, n_pred, case_id, prediction.shape, ground_truth.shape,
+            )
+            n_skip_shape += 1
+            continue
+
+        logger.info(
+            "  [%d/%d] %-20s  pred=%-12s  mask=%s",
+            idx, n_pred, case_id, str(prediction.shape),
+            "yes" if mask is not None else "NO",
+        )
 
         cases.append(
             Case(
                 case_id=case_id,
                 prediction=prediction,
-                ground_truth=load_image(gt_path),
+                ground_truth=ground_truth,
                 mask=mask,
                 precontrast=precontrast,
                 prediction_path=str(pred_file),
@@ -237,6 +398,14 @@ def load_cases_local(
                 mask_path=str(mask_file) if mask_file else None,
             )
         )
+
+    skipped = n_skip_gt + n_skip_shape
+    if skipped:
+        logger.warning(
+            "  Skipped %d/%d case(s) — %d missing GT, %d shape mismatch.",
+            skipped, n_pred, n_skip_gt, n_skip_shape,
+        )
+
     return cases
 
 
@@ -277,9 +446,10 @@ def load_segmentation_model(
         import torch
         from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
     except ImportError:
-        print(
-            "WARNING: nnunetv2 not installed — segmentation evaluator disabled.",
-            file=sys.stderr,
+        logger.warning(
+            "nnunetv2 not installed — segmentation evaluator (Dice, HD95) "
+            "will be disabled. Ensure nnunetv2 is listed in your container's "
+            "requirements and installed correctly."
         )
         return None
 
@@ -309,7 +479,10 @@ def load_segmentation_model(
         use_folds=(fold,),
         checkpoint_name="checkpoint_final.pth",
     )
-    print(f"  Segmentation model loaded from {seg_dir} (fold {fold}, device {device})")
+    logger.info(
+        "  Segmentation model loaded from %s (fold %s, device %s)",
+        seg_dir, fold, device,
+    )
 
     import tempfile
     import SimpleITK as sitk
@@ -407,17 +580,31 @@ def run_evaluation(
     all_per_case: dict[str, dict[str, float]] = {}
     all_aggregates: dict[str, dict[str, float]] = {}
 
-    for name, evaluator in evaluators:
-        print(f"[INFO] Running evaluator: {name}")
+    n_evaluators = len(evaluators)
+    for eval_idx, (name, evaluator) in enumerate(evaluators, 1):
+        logger.info("[%d/%d] Running %s ...", eval_idx, n_evaluators, name)
+        t0 = time.perf_counter()
         try:
             result = evaluator.evaluate(cases)  # type: ignore[attr-defined]
             for cid, m in result.per_case.items():
                 all_per_case.setdefault(cid, {}).update(m)
             all_aggregates.update(result.aggregates)
-            n_agg = len(result.aggregates)
-            print(f"  {name}: OK ({n_agg} aggregate metric(s))")
+            elapsed = time.perf_counter() - t0
+            agg_keys = list(result.aggregates.keys())
+            logger.info(
+                "       %s: OK in %.1f s — %d aggregate metric(s): %s",
+                name, elapsed,
+                len(agg_keys),
+                ", ".join(agg_keys) if agg_keys else "none",
+            )
         except Exception as exc:
-            print(f"  {name}: FAILED — {exc}", file=sys.stderr)
+            elapsed = time.perf_counter() - t0
+            logger.error(
+                "       %s FAILED after %.1f s: %s\n"
+                "       This evaluator's metrics will be absent from the output. "
+                "Other evaluators continue unaffected.",
+                name, elapsed, exc,
+            )
 
     # Clear the in-memory radiomic feature cache to free memory
     from evaluators.roi_metrics import clear_feature_cache
@@ -433,84 +620,157 @@ def run_evaluation(
 
 def main() -> int:
     """Main entry point for the GC evaluation container."""
-    print("=" * 50)
-    print("MAMA-SYNTH Evaluation")
-    print("=" * 50)
+    t_start = time.perf_counter()
+    _SEP = "=" * 60
+
+    # ---- Banner ------------------------------------------------------
+    logger.info(_SEP)
+    logger.info("  MAMA-SYNTH Evaluation  |  Grand Challenge")
+    logger.info("  Prediction slug : %s", PREDICTION_SLUG)
+    logger.info(_SEP)
 
     # ---- Read configuration from environment -------------------------
-    input_dir = Path(os.environ.get("MAMA_INPUT_DIR", "/input"))
+    input_dir  = Path(os.environ.get("MAMA_INPUT_DIR",  "/input"))
     output_dir = Path(os.environ.get("MAMA_OUTPUT_DIR", "/output"))
-    gt_dir = Path(
-        os.environ.get(
-            "MAMA_GT_DIR", "/opt/ml/input/data/ground_truth"
-        )
-    )
-    models_dir = Path(
-        os.environ.get("MAMA_MODELS_DIR", "/opt/app/models")
-    )
+    gt_dir     = Path(os.environ.get("MAMA_GT_DIR",
+                                     "/opt/ml/input/data/ground_truth"))
+    models_dir = Path(os.environ.get("MAMA_MODELS_DIR", "/opt/app/models"))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.json"
 
+    # ---- Log resolved paths and verify existence ---------------------
+    def _status(p: Path) -> str:
+        return "EXISTS" if p.exists() else "NOT FOUND"
+
+    logger.info("Paths:")
+    logger.info("  Input  : %-50s [%s]", input_dir,  _status(input_dir))
+    logger.info("  GT     : %-50s [%s]", gt_dir,     _status(gt_dir))
+    logger.info("  Models : %-50s [%s]", models_dir, _status(models_dir))
+    logger.info("  Output : %s", output_dir)
+
+    if not input_dir.exists():
+        logger.error(
+            "Input directory not found: %s\n"
+            "On Grand Challenge this should be /input. "
+            "Set MAMA_INPUT_DIR to override.",
+            input_dir,
+        )
+    if not gt_dir.exists():
+        logger.error(
+            "Ground-truth directory not found: %s\n"
+            "Ensure ground_truth.zip was uploaded to this phase and "
+            "extracted correctly by Grand Challenge.",
+            gt_dir,
+        )
+
+    models_dir_arg: Optional[Path]
+    if not models_dir.exists():
+        logger.warning(
+            "Models directory not found: %s\n"
+            "Classification and segmentation evaluators will be disabled.\n"
+            "Image-level metrics (MSE, LPIPS) and ROI metrics (SSIM-tumour, "
+            "FRD) will still run.",
+            models_dir,
+        )
+        models_dir_arg = None
+    else:
+        models_dir_arg = models_dir
+
+    logger.info(_SEP)
+
     # ---- Discover and load cases -------------------------------------
     if (input_dir / "predictions.json").exists():
-        print("Loading cases from GC predictions.json …")
+        logger.info("Mode: Grand Challenge  (predictions.json detected)")
+        logger.info("Loading cases ...")
         cases = load_cases_gc(input_dir, gt_dir)
     else:
-        print("Loading cases from flat directories (local mode) …")
-        pred_dir = Path(
-            os.environ.get("MAMA_PREDICTIONS_DIR", str(input_dir))
-        )
-        # GT images live under gt_dir/ground_truth/ (mirrors the GC zip structure).
-        # Fall back to gt_dir itself only when the subfolder is absent.
+        logger.info("Mode: local / flat-directory")
+        pred_dir = Path(os.environ.get("MAMA_PREDICTIONS_DIR", str(input_dir)))
         gt_images_dir = (
-            gt_dir / "ground_truth" if (gt_dir / "ground_truth").exists() else gt_dir
+            gt_dir / "ground_truth"
+            if (gt_dir / "ground_truth").exists()
+            else gt_dir
         )
         masks_env = os.environ.get("MAMA_MASKS_DIR")
         masks_sub = gt_dir / "masks"
-        masks_dir = (
+        masks_dir_local: Optional[Path] = (
             Path(masks_env) if masks_env
             else masks_sub if masks_sub.exists()
             else None
         )
-        # No precontrast in the ground_truth.zip; kept for local-override use only.
         precon_env = os.environ.get("MAMA_PRECONTRAST_DIR")
-        precon_dir = Path(precon_env) if precon_env else None
-        cases = load_cases_local(
-            pred_dir, gt_images_dir, masks_dir, precon_dir,
+        precon_dir: Optional[Path] = Path(precon_env) if precon_env else None
+        logger.info(
+            "  Predictions : %s\n"
+            "  GT images   : %s\n"
+            "  Masks       : %s",
+            pred_dir, gt_images_dir,
+            masks_dir_local if masks_dir_local
+            else "none (SSIM-tumour / AUROC / FRD disabled)",
         )
+        cases = load_cases_local(pred_dir, gt_images_dir, masks_dir_local, precon_dir)
+
+    logger.info(_SEP)
 
     if not cases:
-        print("ERROR: no valid cases found.", file=sys.stderr)
+        logger.error(
+            "No valid cases could be loaded.\n"
+            "Common causes:\n"
+            "  \u2022 Your algorithm writes to a different output socket "
+            "(expected slug: '%s')\n"
+            "  \u2022 Prediction filenames do not match ground-truth case IDs\n"
+            "  \u2022 ground_truth.zip was not uploaded or extracted correctly\n"
+            "  \u2022 All cases were skipped due to spatial shape mismatch\n"
+            "Review the per-case warnings above for details.",
+            PREDICTION_SLUG,
+        )
         write_metrics({"case": {}, "aggregates": {}}, metrics_path)
         return 1
 
-    n_mask = sum(1 for c in cases if c.mask is not None)
-    n_pre = sum(1 for c in cases if c.precontrast is not None)
-    print(
-        f"  Cases: {len(cases)}, "
-        f"with masks: {n_mask}, "
-        f"with pre-contrast: {n_pre}"
+    n_mask   = sum(1 for c in cases if c.mask is not None)
+    n_pre    = sum(1 for c in cases if c.precontrast is not None)
+    n_nomask = len(cases) - n_mask
+    logger.info(
+        "Loaded %d case(s)  |  with mask: %d  |  without mask: %d  |  "
+        "with pre-contrast: %d",
+        len(cases), n_mask, n_nomask, n_pre,
     )
+    if n_nomask > 0:
+        logger.warning(
+            "%d case(s) have no tumour mask — SSIM-tumour, AUROC-tumour-ROI "
+            "and FRD will not be computed for those cases; aggregate scores "
+            "will reflect fewer samples.",
+            n_nomask,
+        )
+    logger.info(_SEP)
 
     # ---- Run evaluation ----------------------------------------------
-    metrics = run_evaluation(cases, models_dir)
+    logger.info("Running evaluators ...")
+    metrics = run_evaluation(cases, models_dir_arg)
     write_metrics(metrics, metrics_path)
 
-    # ---- Summary -----------------------------------------------------
-    print(f"\nMetrics written to {metrics_path}")
+    # ---- Final summary -----------------------------------------------
+    elapsed_total = time.perf_counter() - t_start
+    logger.info(_SEP)
+    logger.info("Results written to: %s", metrics_path)
     agg = metrics.get("aggregates", {})
     if agg:
-        print("\n--- Aggregates ---")
+        logger.info("Aggregate metrics:")
         for key in sorted(agg):
             val = agg[key]
-            if "mean" in val:
+            if isinstance(val, dict) and "mean" in val:
                 std = val.get("std", 0.0)
-                print(f"  {key}: {val['mean']:.4f} (±{std:.4f})")
+                logger.info("  %-32s %.4f  (\u00b1%.4f std)", key, val["mean"], std)
             else:
-                print(f"  {key}: {val}")
-
-    print("=" * 50)
+                logger.info("  %-32s %s", key, val)
+    else:
+        logger.warning(
+            "No aggregate metrics were produced — all evaluators may have "
+            "been skipped or failed. Review the warnings above."
+        )
+    logger.info("Total wall time: %.1f s", elapsed_total)
+    logger.info(_SEP)
     return 0
 
 

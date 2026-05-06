@@ -15,11 +15,14 @@ The model is cached at **module level** to avoid OOM in long sessions.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import numpy as np
 
 from .base import BaseEvaluator, Case, EvaluationResult
+
+logger = logging.getLogger(__name__)
 
 # ---- Module-level LPIPS model cache ----------------------------------
 _LPIPS_MODEL_CACHE: dict[str, object] = {}
@@ -60,10 +63,10 @@ class ImageMetricsEvaluator(BaseEvaluator):
             _get_lpips_model("alex")
             self._lpips_available = True
         except Exception:
-            print(
-                "WARNING: LPIPS unavailable (torch + torchmetrics required), "
-                "LPIPS metric will be skipped.",
-                file=sys.stderr,
+            logger.warning(
+                "LPIPS model unavailable (torch + torchmetrics required). "
+                "LPIPS metric will be absent from results. "
+                "Ensure torch and torchmetrics are installed in your container."
             )
 
     # ------------------------------------------------------------------
@@ -74,6 +77,27 @@ class ImageMetricsEvaluator(BaseEvaluator):
         for case in cases:
             metrics: dict[str, float] = {}
             pred, gt = case.prediction, case.ground_truth
+
+            # ---- Shape guard -----------------------------------------
+            if pred.shape != gt.shape:
+                logger.warning(
+                    "%s — skipping ImageMetrics: prediction shape %s does not "
+                    "match GT shape %s. Ensure your output image has the same "
+                    "spatial dimensions as the ground-truth slice (H×W).",
+                    case.case_id, pred.shape, gt.shape,
+                )
+                continue
+
+            # ---- Intensity range sanity check ------------------------
+            pred_absmax = float(np.max(np.abs(pred)))
+            if pred_absmax > 500:
+                logger.warning(
+                    "%s — extreme prediction intensities (|max|=%.1f). "
+                    "Metrics will be computed but scores are unreliable. "
+                    "Predictions must be z-score normalised (expected |max|<100).",
+                    case.case_id, pred_absmax,
+                )
+
             metrics["mse"] = float(np.mean((pred - gt) ** 2))
 
             if self._lpips_available:
@@ -81,6 +105,7 @@ class ImageMetricsEvaluator(BaseEvaluator):
                 if lpips_val is not None:
                     metrics["lpips"] = lpips_val
 
+            logger.debug("%s  mse=%.4f", case.case_id, metrics["mse"])
             per_case[case.case_id] = metrics
 
         agg: dict[str, dict[str, float]] = {}
