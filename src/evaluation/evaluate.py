@@ -177,11 +177,23 @@ def load_mask(path: Path) -> np.ndarray:
     return mask
 
 
+def _sanitize_for_json(obj):
+    """Recursively replace float inf/nan with None so json.dump doesn't crash."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):  # nan or ±inf
+            return None
+    return obj
+
+
 def write_metrics(metrics: dict, path: Path) -> None:
     """Write *metrics* as JSON to *path*."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        json.dump(metrics, fh, indent=2)
+        json.dump(_sanitize_for_json(metrics), fh, indent=2)
 
 
 def _find_file(directory: Path, stem: str) -> Optional[Path]:

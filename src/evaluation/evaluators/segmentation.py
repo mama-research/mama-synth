@@ -50,17 +50,28 @@ class SegmentationEvaluator(BaseEvaluator):
                 continue
             try:
                 pred_mask = self.segment_fn(case.prediction)
+                gt_mask = case.mask.astype(bool)
                 if pred_mask is None or not np.any(pred_mask):
+                    # Penalty HD95 = image diagonal (maximum possible distance).
+                    # Using inf would make the aggregate mean infinite and
+                    # uninformative; the diagonal preserves ranking signal
+                    # from cases where segmentation did succeed.
+                    h, w = gt_mask.shape[-2], gt_mask.shape[-1]
+                    hd95_penalty = float(np.sqrt(h ** 2 + w ** 2))
                     logger.warning(
                         "%s — segmentation model returned an empty mask "
-                        "(all zeros). Dice will be 0 for this case. "
+                        "(all zeros). Dice=0 and HD95=%.1f (image diagonal) "
+                        "recorded for this case. "
                         "Check that your images are correctly normalised and "
                         "that the nnUNet model checkpoint is intact.",
-                        case.case_id,
+                        case.case_id, hd95_penalty,
                     )
+                    per_case[case.case_id] = {
+                        "dice": 0.0,
+                        "hausdorff_95": hd95_penalty,
+                    }
                     continue
                 pred_mask = pred_mask.astype(bool)
-                gt_mask = case.mask.astype(bool)
 
                 dice = compute_dice(pred_mask, gt_mask)
                 hd95 = compute_hausdorff_95(pred_mask, gt_mask)
