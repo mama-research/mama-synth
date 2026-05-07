@@ -26,7 +26,7 @@ rm -rf "$SCRIPT_DIR/test/output"
 mkdir -p "$SCRIPT_DIR/test/output"
 
 # Verify that a test input file exists
-INPUT_DIR="$SCRIPT_DIR/test/input/images/pre-contrast-dce-mri-slice-breast"
+INPUT_DIR="$SCRIPT_DIR/test/input/images/pre-contrast-breast-mri"
 if [ -z "$(ls -A "$INPUT_DIR"/*.mha 2>/dev/null)" ]; then
     echo ""
     echo "ERROR: No .mha file found in $INPUT_DIR"

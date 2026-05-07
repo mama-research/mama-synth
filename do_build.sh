@@ -1,5 +1,6 @@
 
 # Stop at first error
+echo "Starting build of the Docker image. This can take a while."
 set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -10,3 +11,4 @@ docker build \
   --tag "$DOCKER_IMAGE_TAG"  \
   ${DOCKER_QUIET_BUILD:+--quiet} \
   "$SCRIPT_DIR" 2>&1
+  #--no-cache \

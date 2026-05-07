@@ -93,13 +93,13 @@ class ROIMetricsEvaluator(BaseEvaluator):
                 full=True,
             )
             ssim_roi = float(np.mean(ssim_map[case.mask]))
-            per_case[case.case_id] = {"ssim_tumor": ssim_roi}
+            per_case[case.case_id] = {"ssim_tumour": ssim_roi}
 
         # ---- Aggregates ------------------------------------------
         agg: dict[str, dict[str, float]] = {}
-        ssim_agg = self._aggregate_metric(per_case, "ssim_tumor")
+        ssim_agg = self._aggregate_metric(per_case, "ssim_tumour")
         if ssim_agg:
-            agg["ssim_tumor"] = ssim_agg
+            agg["ssim_tumour"] = ssim_agg
 
         if n_skip_no_mask + n_skip_empty > 0:
             logger.info(
