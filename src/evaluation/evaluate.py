@@ -489,51 +489,44 @@ def load_segmentation_model(
     predictor.initialize_from_trained_model_folder(
         str(seg_dir),
         use_folds=(fold,),
-        checkpoint_name="checkpoint_final.pth",
+        checkpoint_name="checkpoint_best.pth",
     )
     logger.info(
         "  Segmentation model loaded from %s (fold %s, device %s)",
         seg_dir, fold, device,
     )
 
-    import tempfile
-    import SimpleITK as sitk
-    from contextlib import redirect_stdout, redirect_stderr
-    from io import StringIO
-
     def segment_fn(image: np.ndarray) -> np.ndarray:
-        """Run nnUNet inference on a single 2-D image."""
+        """Run nnUNet inference on a single 2-D image via in-memory numpy array.
+
+        This uses ``predict_single_npy_array`` to avoid the costly file I/O
+        round-trip (write NIfTI → read back → infer → write → read) that
+        ``predict_from_files`` would incur on every case.
+
+        The input array must be shaped ``(H, W)`` (2-D) or ``(1, H, W)`` and
+        is reshaped to ``(1, 1, H, W)`` — i.e. ``(channels, depth, height,
+        width)`` — matching the 4-D convention that nnUNet's ``SimpleITKIO``
+        reader produces when reading a single 2-D slice from disk.
+        """
         arr = image.astype(np.float32)
         if arr.ndim == 2:
-            arr = arr[np.newaxis, :, :]  # add Z dim for nnUNet
+            arr = arr[None, None, :, :]      # (1, 1, H, W) — channels, depth, H, W
+        elif arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[None, :, :, :]          # (1, 1, H, W) from (1, H, W)
+        else:
+            arr = arr[None, :, :, :]          # fallback → (1, D, H, W)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            in_dir = Path(tmpdir) / "input"
-            out_dir = Path(tmpdir) / "output"
-            in_dir.mkdir()
-            out_dir.mkdir()
+        # Spacing from the training plans; images are already at this
+        # resolution so this value is used for metadata / resampling only.
+        # The 3-element spacing correspond to (depth, height, width).
+        spacing = (1.0, 0.7031, 0.7031)
+        image_properties = {"spacing": spacing}
 
-            sitk.WriteImage(
-                sitk.GetImageFromArray(arr),
-                str(in_dir / "case_0000.nii.gz"),
-            )
-
-            # Suppress stdout/stderr during inference
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                predictor.predict_from_files(
-                    str(in_dir),
-                    str(out_dir),
-                    save_probabilities=False,
-                    overwrite=True,
-                    num_processes_preprocessing=1,
-                    num_processes_segmentation_export=1,
-                )
-
-            pred_path = out_dir / "case.nii.gz"
-            if not pred_path.exists():
-                return np.zeros(image.shape, dtype=bool)
-
-            pred = sitk.GetArrayFromImage(sitk.ReadImage(str(pred_path)))
+        pred = predictor.predict_single_npy_array(
+            arr,
+            image_properties,
+            save_or_return_probabilities=False,
+        )
 
         mask = pred > 0
         if image.ndim == 2 and mask.ndim == 3:
