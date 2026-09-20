@@ -7,7 +7,7 @@ MAMA-SYNTH is a challenge focused on synthesizing virtual post-contrast breast M
 
 Dynamic contrast-enhanced MRI (DCE-MRI) plays a central role in breast cancer diagnosis, treatment planning, and disease monitoring. However, the use of gadolinium-based contrast agents introduces important concerns related to patient safety, environmental contamination, and accessibility of advanced imaging workflows. MAMA-SYNTH provides a standardized evaluation framework for generative models that aim to recover diagnostically relevant post-contrast information from non-contrast acquisition.
 
-### 🔗 Visit our [Website](https://www.ub.edu/mama-synth/) for more information and 📢 participate on [Grand Challenge](https://mamasynth.grand-challenge.org/).
+### 🔗 Visit our [Website](https://mama-research.github.io/mama-synth.html) for more information and 📢 participate on [Grand Challenge](https://mamasynth.grand-challenge.org/).
 
 ---
 
